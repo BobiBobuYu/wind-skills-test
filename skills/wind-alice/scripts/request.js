@@ -874,6 +874,85 @@ export function extractAgentResultValues(events) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 服务端拒绝原因的归类
+// ---------------------------------------------------------------------------
+// 旧行为：命中 result.isError 只打一行 `request failed (result.isError): <原文>`
+// 然后 exitCode = 1 收工。对「积分不足」这种**唯一出路是充值、重试一万次也没用**的
+// 拒绝，宿主 Agent 只拿到一句光秃秃的原文，既没有充值入口，也分不出这是
+// 「要用户去充值」还是「CLI 自己挂了」，于是常给出"稍后重试"这种完全无效的建议。
+//
+// 这里按文案归类，给出各自该做的动作和可区分的退出码。
+// points 必须排在 quota 之前：quota 的 /额度耗尽/ 较宽泛，会把积分问题误判成
+// 「明日再来」，而积分不足等再久也没用。
+
+/** 受阻类拒绝的退出码：临时性失败、非 CLI 故障，宿主 Agent 应停止重试。 */
+const EXIT_SERVER_BLOCKED = 75;
+
+const RESULT_ERROR_CLASSIFIERS = [
+  {
+    kind: "concurrency",
+    patterns: [
+      /最大同步执行任务/,
+      /同步执行任务数目/,
+      /并发.*(限制|上限)/,
+      /同时.*执行.*上限/,
+      /请等待其他任务执行完成/,
+      /Maximum concurrent tasks limit/i,
+    ],
+  },
+  {
+    // 注意现场原文是「账户积分**余额**不足」——中间夹了「余额」，/积分不足/ 这条
+    // 字面相邻的正则匹配不到，必须留着 /积分余额.*不足/ 和 /请.*充值/。
+    kind: "points",
+    patterns: [
+      /积分不足/,
+      /积分已用完/,
+      /积分.*用尽/,
+      /积分.*耗尽/,
+      /积分余额.*不足/,
+      /余额不足/,
+      /请.*充值/,
+      /Points not enough/i,
+      /insufficient\s+points/i,
+      /points?\s*(?:not\s*enough|exhausted|insufficient)/i,
+    ],
+  },
+  {
+    kind: "quota",
+    patterns: [/体验期.*限额/, /超出体验期/, /额度耗尽/, /明日再来/, /当日.*额度/],
+  },
+  {
+    kind: "busy",
+    patterns: [/服务繁忙/, /系统繁忙/, /请稍后重试/],
+  },
+];
+
+/**
+ * 把服务端拒绝文案归类。
+ * @returns {{kind: string, exitCode: number}} 认不出的归 generic（退出码 1，原文照打）
+ */
+export function classifyResultError(text) {
+  const s = String(text ?? "");
+  for (const { kind, patterns } of RESULT_ERROR_CLASSIFIERS) {
+    if (patterns.some((re) => re.test(s))) {
+      return { kind, exitCode: EXIT_SERVER_BLOCKED };
+    }
+  }
+  return { kind: "generic", exitCode: 1 };
+}
+
+/**
+ * 事件是否是 `result.isError` 形态的服务端拒绝。
+ *
+ * 和 extractResultErrorText 分开判定：那个函数在「isError 为 true 但一段可读文案
+ * 都没有」时返回 null，光靠它会让这种响应重新变成静默成功退出——正是本修复要堵的洞。
+ */
+export function isResultError(event) {
+  const result = event?.result;
+  return !!result && typeof result === "object" && result.isError === true;
+}
+
 /**
  * 从 Alice 服务端的 `result.isError` 形态错误中提取可读文本。
  *
@@ -1603,8 +1682,10 @@ export function emitParsedEvents(events) {
   logWindTrialQuotaIfPresent(events);
   refreshSessionContextIdFromEvents(events);
   printEvents(events);
-  if (printResultErrors(events)) {
-    process.exitCode = 1;
+  const resultErrorExit = printResultErrors(events);
+  if (resultErrorExit) {
+    // 积分不足等受阻类用 75，普通失败仍是 1；已被置过非 0 码时不覆盖（先写者为准）
+    if (!process.exitCode) process.exitCode = resultErrorExit;
     return;
   }
   // 先取服务端 PresentFiles 声明（权威清单），再扫正文留作兜底。
@@ -1622,16 +1703,53 @@ export function emitParsedEvents(events) {
  * 旧版只认 `error` 字段，会把这些错误当正常流静默丢弃。
  */
 function printResultErrors(events) {
-  if (!Array.isArray(events) || events.length === 0) return false;
-  let hit = false;
+  if (!Array.isArray(events) || events.length === 0) return 0;
+  let exitCode = 0;
   for (const ev of events) {
-    const text = extractResultErrorText(ev);
-    if (text) {
-      console.error(`request failed (result.isError): ${text}`);
-      hit = true;
-    }
+    // 用 isResultError 判定、而不是「extract 出文本才算命中」：
+    // isError 为 true 但没有任何可读文案时也必须报错，否则又退回静默成功退出。
+    if (!isResultError(ev)) continue;
+    const text =
+      extractResultErrorText(ev) ?? "服务端返回 isError=true，但未给出可读文案。";
+    const { kind, exitCode: code } = classifyResultError(text);
+
+    console.error(`request failed (result.isError): ${text}`);
+    emitResultErrorGuidance(kind, text);
+    // 多条拒绝同时出现时取更"硬"的那个码：受阻（75）优先于普通失败（1）
+    exitCode = Math.max(exitCode, code);
   }
-  return hit;
+  return exitCode;
+}
+
+/**
+ * 按拒绝类型给宿主 Agent 可执行的指引。
+ * 机器可读标记 `ALICE_BLOCKED_REASON=<kind>` 便于上层判定，不用去正则匹配中文。
+ */
+function emitResultErrorGuidance(kind, text) {
+  if (kind === "generic") return;
+
+  console.error(`ALICE_BLOCKED_REASON=${kind}`);
+  if (kind === "points") {
+    console.error("[严重] 账户 Alice 积分不足，本次调用未能发起（不是网络或操作出错）。");
+    console.error(`[严重] 充值入口：${WIND_AIFINMARKET_CREDITS}`);
+    console.error("[严重] **充值前重试无效**：不要立即重试、不要换 prompt、不要换 --skill。");
+    console.error(
+      "[严重] 转告用户（可近似原样使用）：「很抱歉，这次没能跑起来——您的 Alice 积分已用完。" +
+        `烦请前往 ${WIND_AIFINMARKET_CREDITS} 充值，充值后把刚才的问题再发一遍，我立刻为您重新生成。」`,
+    );
+  } else if (kind === "quota") {
+    console.error("[严重] 账户额度 / 体验期限额已用尽。");
+    console.error("[严重] 不要立即重试或换 prompt；请稍后或次日再试，或更换 API Key。");
+  } else if (kind === "concurrency") {
+    console.error("[严重] 当前账号并发任务数已达上限，本次未发起。");
+    console.error(
+      "[严重] 不要立即重试、不要换 prompt；等该账号下已在执行的任务跑完后，用相同 prompt 重试。",
+    );
+  } else if (kind === "busy") {
+    console.error("[严重] 服务端繁忙，暂不接受新任务。");
+    console.error("[严重] 不要连续重试；等几分钟后用相同 prompt 再试。");
+  }
+  console.error(`[严重] 退出码=${EXIT_SERVER_BLOCKED}（临时性失败，非 CLI 故障）。`);
 }
 
 /** 非流式路径包装：命中体验配额时返回 true，让调用方提前 return。 */

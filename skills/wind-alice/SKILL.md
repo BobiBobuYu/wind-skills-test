@@ -220,7 +220,19 @@ CLI 会在下载前把判定过程打到 stderr，附件没下来时看这几行
 6. **耗时预期与耐心提示**：调用前须提醒用户 Alice Skill 可能较慢；执行中不得因等待过久而中断 CLI、改走其它工具或并行重复调用同一任务。
 7. **不要凭空构造 `selectedSkillIds` / `agentCard` 之类的旧字段去指定 Skill** - 已实测不生效，必须走文本前缀。
 8. **禁止改写用户问句**：`--prompt` 必须是用户的**原话**，不得"帮用户组织语言"、只提取关键词、翻译或重写。例如用户问 `Can I get a one-pager for [300498]?`，就必须传 `--prompt "Can I get a one-pager for [300498]?"`，不得改写为 `--prompt "300498"`。CLI 会自动在前面拼接 Skill 标识前缀（如 `Using "Company One-Page Investment Memo" skill:`），用户问句本身必须原样透传，服务端才能收到完整的原始问题。
-9. **交付 gentResult.value 正文（附件路径已内联）**：正文必须来自 stdout 的 gentResult.value（CLI 已把 /project/ 附件引用就地替换为本地下载路径），禁止概括、摘要、改写；**不要**在回复末尾再追加附件路径提示（路径已内联在正文中）；**禁止**读取 .agents/download/ 附件内容展示给用户。
+9. **服务端拒绝受理时按退出码 75 处理，禁止自行重试**：服务端会以 HTTP 200 +
+   `result.isError` 返回拒绝原因（**不是** JSON-RPC 的 `error` 字段）。CLI 命中后会把
+   服务端原文打到 stderr，并输出 `ALICE_BLOCKED_REASON=<points|quota|concurrency|busy>`
+   和 `[严重]` 指引，退出码 **75**（临时性失败，非 CLI 故障）。
+   - `points`（积分不足）：**充值前重试一律无效**。禁止立即重试、禁止换 prompt、禁止换
+     `--skill`；必须引导用户前往 <https://market.windalice.com/#/user/credits> 充值，
+     充值后由**用户重新发问**。禁止说"稍后重试"或"等任务跑完"——那是 busy / concurrency 的话术。
+   - `quota`：稍后或次日再试，或更换 API Key。
+   - `concurrency`：等该账号下已在执行的任务跑完，再用**相同 prompt** 重试。
+   - `busy`：等几分钟后用相同 prompt 再试，不要连续重试。
+   - 认不出的拒绝文案退出码为 1，CLI 仍会原样打出服务端原文，转告用户即可。
+   - **禁止**把退出码 75 当成 CLI 故障去排查 Key、网络或改参数重跑。
+10. **交付 gentResult.value 正文（附件路径已内联）**：正文必须来自 stdout 的 gentResult.value（CLI 已把 /project/ 附件引用就地替换为本地下载路径），禁止概括、摘要、改写；**不要**在回复末尾再追加附件路径提示（路径已内联在正文中）；**禁止**读取 .agents/download/ 附件内容展示给用户。
 
 ## 更新检查处理
 
