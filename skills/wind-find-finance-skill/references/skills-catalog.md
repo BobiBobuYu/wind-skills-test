@@ -57,12 +57,15 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | 宏观数据解读 | `Macro Data Interpretation` | CPI、PPI、PMI、GDP、社融等宏观指标的研究周报式解读 |
 | 市场规模测算与战略建模 | `Market Sizing & Strategic Modeling` | Top-down / Bottom-up 市场规模测算与情景敏感性 |
 | 金融监管局处罚月报 | `NFRA Monthly Enforcement Report` | 银行/保险/信托行政处罚的月度汇总、趋势与明细 |
+| 有色板块深度透视 | `Nonferrous Metals Sector Deep Analysis` | 铜铝锌镍锡铅六大品种的供需平衡、产业链利润、库存与宏观定价研判 |
 | 期权定价计算器 | `Option Pricing Calculator` | 香草到雪球各类期权的理论价格(NPV)与希腊字母 |
 | 期权波动率洞察 | `Option Volatility Insights` | 期权 IV 估值、期限结构、Skew、PCR 与波动率曲面 |
 | 期权交易策略 | `Options Trading Strategies` | 个股期权波动率信号、异动打分与五段式交易方案 |
 | 幻灯片 | `PPT Generator` | 按主题与结构化内容生成专业 PPT 报告 |
+| 贵金属板块深度透视 | `Precious Metals Sector Deep Dive` | 金银铂钯四大品种的行情复盘、金银比、资金与租赁利率分析 |
 | 证券业监管政策简报 | `Securities Regulatory Policy Briefing` | 指定区间证券业监管政策详情、清单与机构分布 |
 | 上市公司调研问题清单 | `Stock DD List` | 买方视角调研备忘录、深度议题和管理层提问 |
+| 股票交易策略 | `Stock Trading Strategy` | 覆盖持仓盈亏、基本面估值、技术量化、行业生态与执行风控的个股策略 |
 | 按主题选股 | `Thematic Stock Screening` | 拆解市场主线、验证主题逻辑、筛选真实受益标的 |
 
 ---
