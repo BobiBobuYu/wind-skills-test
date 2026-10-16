@@ -1,69 +1,349 @@
 #!/usr/bin/env node
 // wind-mcp-skill CLI 入口：命令分发、参数读取、信封输出与退出码。Agent 只读 stdout。
 // Wind MCP 客户端逻辑在 mcp.mjs，自动更新在 update-check.mjs。
-import { readFileSync } from 'node:fs';
+// 调用方 agent 识别（detect-agent）已内联在本文件：只读本进程的环境变量和祖先进程，不联网。
+import { readFileSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import {
-  CliError, SERVERS, SKILL_DIR, SKILL_VERSION, buildToolArguments, mcpInitializeAndCall,
+  CliError, ServerResponseError, isServerToolError, SERVERS, CALL_EXAMPLES, SKILL_DIR, SKILL_VERSION, buildToolArguments, mcpInitializeAndCall, createMcpSession,
   normalizeCallSuccess, openDeveloperPortal, resolveServerType, serverListEntries, serverTypeList,
-  stripBom, writeApiKey,
+  stripBom, writeApiKey, getUserAgent,
 } from './mcp.mjs';
 import { diagnoseUpdate, triggerUpdateCheck } from './update-check.mjs';
+let cliIdentity;
 
-const CALL_EXAMPLES = [
-  `cli.mjs call stock_research stock_screener '{"question":"筛选沪深市场市值超500亿且连续5日上涨的股票"}'`,
-  `cli.mjs call stock_research stock_get_company_profile '{"windCode":"600519.SH"}'`,
-  `cli.mjs call fund_research fund_get_basic_info '{"windCodes":["005827.OF"]}'`,
-  `cli.mjs call general_data quote_get_realtime_indicators '{"windCodes":["600519.SH"],"indexes":"最新成交价,涨跌幅"}'`,
-  `cli.mjs call company_data company_search_entity '{"searchKey":"贵州茅台"}'`,
-  `cli.mjs call edb_data economic_search_indicator '{"question":"中国GDP相关指标"}'`,
-  `cli.mjs call index_data get_index_kline '{"windcode":"000300.SH","begin_date":"2026-04-01","end_date":"2026-04-30"}'`,
-  `cli.mjs call financial_docs get_financial_news '{"query":"美联储利率政策","top_k":3}'`,
-  `cli.mjs call analytics_data get_financial_data '{"question":"查询中国A股市场过去一年的平均成交量"}'`,
-];
+// ---------- 调用方 agent 识别（内联自 detect-agent.mjs） ----------
+// 判断当前是哪个 AI agent 在调用 CLI，返回请求头 User-Agent 的值：`claude-code/2.1.296`；
+// 拿不到版本时只有名字（`codex`），认不出时为 `unknown`。
+// 返回值只含 [A-Za-z0-9_./-]，可以直接放进 HTTP 头：fetch 遇到中文或换行会直接抛 TypeError。
 
-// 有默认文案的错误码：detail 优先（截 500 字），否则用默认文案。其余错误码（如 backend_error）
-// 直接透传后端信息（截 2000 字）。
-const DEFAULT_ERROR_MESSAGES = {
-  AUTH_ERROR: '认证失败，请检查 API Key',
-  PARAM_TYPE_ERROR: '参数类型错误，请检查字段类型',
-  USAGE_ERROR: '命令用法错误，请检查输入参数',
-  PARAMS_FILE_ERROR: '参数文件读取失败，请检查文件路径和内容',
-  INVALID_PARAMS_JSON: '参数格式错误，params 必须是 JSON 对象',
-  ROUTE_ERROR: '工具路由失败，请检查 server_type 和 tool_name',
-  PARAM_VALIDATION_ERROR: '参数校验失败，请检查字段名和取值',
-  PARAM_CONFLICT_ERROR: '参数存在冲突，请检查输入组合',
-  RATE_LIMIT_ERROR: '请求过于频繁，请稍后重试',
-  NETWORK_ERROR: '服务暂时不可用，请稍后重试',
-  TOOL_RUNTIME_ERROR: '响应解析失败，请稍后重试',
-  SETUP_ERROR: '本地配置缺失或无效，请检查技能配置',
-};
-const UNKNOWN_ERROR_MESSAGE = '调用失败，请稍后重试';
+// 进程名 → agent 名。只按可执行文件名或脚本文件名精确匹配（区分大小写），不在整条命令行里搜子串，
+// 避免 `bash -c "cd ~/claude-notes && ..."` 这类路径被误判。claude 已在 Linux 上实测，其余为各家 CLI 的命令名。
+const PROCESS_NAMES = new Map(Object.entries({
+  claude: 'claude-code',
+  codex: 'codex',
+  gemini: 'gemini-cli',
+  'cursor-agent': 'cursor-cli',
+  opencode: 'opencode',
+  copilot: 'github-copilot-cli',
+  auggie: 'augment',
+  qwen: 'qwen-code',
+  iflow: 'iflow-cli',
+  kimi: 'kimi-cli',
+  kimi_code: 'kimi-code',
+  codebuddy: 'codebuddy',
+  qodercli: 'qoder',
+  openclaw: 'openclaw',
+  hermes: 'hermes',
+  goose: 'goose',
+  aider: 'aider',
+  amp: 'amp',
+  crush: 'crush',
+  droid: 'droid',
+  cline: 'cline',
+}));
+
+// node 直接跑包内入口（进程名是 node、脚本名是 index / cli）时，按脚本路径里的 npm 包名识别。
+const PACKAGE_PATHS = Object.freeze([
+  ['/@anthropic-ai/claude-code/', 'claude-code'],
+  ['/@openai/codex/', 'codex'],
+  ['/@google/gemini-cli/', 'gemini-cli'],
+]);
+
+// agent 注入子进程的环境变量，按顺序判断。`KEY` 表示非空即命中，`KEY=value` 表示必须等于该值。
+// 取自 @vercel/detect-agent 1.2.7（CODEX_SANDBOX_NETWORK_DISABLED 取自 Codex 文档）。与它不同的是
+// IDE 变量（CURSOR_TRACE_ID 等）不在这里、放到最后一层，否则在 Cursor 终端里跑的 Claude Code 会被算成 cursor。
+const ENV_RULES = Object.freeze([
+  ['CURSOR_AGENT', 'cursor-cli'],
+  ['CURSOR_EXTENSION_HOST_ROLE=agent-exec', 'cursor-cli'],
+  ['GEMINI_CLI', 'gemini-cli'],
+  ['CODEX_SANDBOX', 'codex'],
+  ['CODEX_CI', 'codex'],
+  ['CODEX_THREAD_ID', 'codex'],
+  ['CODEX_SANDBOX_NETWORK_DISABLED', 'codex'],
+  ['ANTIGRAVITY_AGENT', 'antigravity'],
+  ['AUGMENT_AGENT', 'augment'],
+  ['OPENCODE=1', 'opencode'],
+  ['OPENCODE_CLIENT', 'opencode'],
+  ['CLAUDECODE', 'claude-code'],
+  ['CLAUDE_CODE', 'claude-code'],
+  ['COPILOT_MODEL', 'github-copilot-cli'],
+  ['COPILOT_ALLOW_ALL', 'github-copilot-cli'],
+  ['COPILOT_GITHUB_TOKEN', 'github-copilot-cli'],
+  ['QODER_WORK_INTEGRATION_PRODUCT', 'qwenwork'],
+  ['WORKBUDDY_APP_NAME', 'workbuddy'],
+  ['KIMI_CODE_HOME', 'kimi-code'],
+]);
+
+// 自带 agent 的 VS Code 系 IDE。它们的终端都报 TERM_PROGRAM=vscode，要看 git askpass 路径里的程序名区分是哪一家。
+const AGENT_IDES = Object.freeze(['cursor', 'windsurf', 'trae', 'kiro', 'qoder', 'codebuddy', 'antigravity']);
+
+// ---------- 进程树 ----------
+
+const MAX_DEPTH = 8;
+const PS_TIMEOUT_MS = 500;
+const INTERPRETER = /^(node|nodejs|bun|deno|pypy3?|python[\d.]*)$/;
+
+function fileName(path) {
+  return String(path)
+    .split(/[\\/]/)
+    .pop()
+    .replace(/^-/, '')
+    .replace(/\.(exe|cmd|bat|js|mjs|cjs|py)$/i, '');
+}
+
+// Linux：直接读 /proc，不起子进程。
+function procAncestors(startPid, log) {
+  const out = [];
+  for (let pid = startPid; pid > 1 && out.length < MAX_DEPTH;) {
+    let stat;
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    } catch (err) {
+      log(`读 /proc/${pid}/stat 失败，停止向上查：${err.message}`);
+      break;
+    }
+    // comm 本身可能含空格和括号，所以 ppid 取最后一个 ')' 之后的第 2 个字段。
+    const close = stat.lastIndexOf(')');
+    const comm = stat.slice(stat.indexOf('(') + 1, close);
+    const ppid = Number(stat.slice(close + 2).split(' ')[1]);
+    let argv = [];
+    try {
+      argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    } catch (err) {
+      log(`读 /proc/${pid}/cmdline 失败，只用 comm：${err.message}`);
+    }
+    out.push({ pid, comm, argv });
+    pid = ppid;
+  }
+  return out;
+}
+
+// macOS 等其他 Unix：一次 ps 拿全表再在内存里往上走，避免每层起一次子进程。
+function psAncestors(startPid, log) {
+  const text = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,ppid=,args='], {
+    encoding: 'utf8',
+    timeout: PS_TIMEOUT_MS,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const table = new Map();
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    if (m) table.set(Number(m[1]), { ppid: Number(m[2]), args: m[3] });
+  }
+  log(`ps 返回 ${table.size} 个进程`);
+  const out = [];
+  for (let pid = startPid; pid > 1 && out.length < MAX_DEPTH && table.has(pid);) {
+    const { ppid, args } = table.get(pid);
+    // ps 只给空格拼接的命令行，路径带空格时会被切开；这里只用程序名和脚本名，影响不大。
+    out.push({ pid, comm: '', argv: args.trim().split(/\s+/) });
+    pid = ppid;
+  }
+  return out;
+}
+
+function defaultAncestors(platform, ppid, log) {
+  // Windows 查进程树要起 PowerShell，代价太大，只靠环境变量。
+  if (platform === 'win32') return [];
+  return platform === 'linux' ? procAncestors(ppid, log) : psAncestors(ppid, log);
+}
+
+// 一个祖先进程是不是 agent：依次看脚本名、可执行文件名、comm（Linux 下即 process.title），最后看脚本路径里的包名。
+function matchProcess(proc) {
+  const exe = fileName(proc.argv[0] || proc.comm || '');
+  const scriptArg = INTERPRETER.test(exe) ? proc.argv.slice(1).find((arg) => !arg.startsWith('-')) : undefined;
+  for (const name of [scriptArg && fileName(scriptArg), exe, proc.comm && fileName(proc.comm)]) {
+    if (name && PROCESS_NAMES.has(name)) return { agent: PROCESS_NAMES.get(name), source: name };
+  }
+  const scriptPath = scriptArg?.replaceAll('\\', '/');
+  const pkg = scriptPath && PACKAGE_PATHS.find(([segment]) => scriptPath.includes(segment));
+  return pkg ? { agent: pkg[1], source: pkg[0] } : null;
+}
+
+// ---------- 各层 ----------
+
+function parseDeclared(raw) {
+  // Claude Code 的写法：claude-code_2-1-296_agent
+  const claude = raw.match(/^(.+?)_(\d+(?:-\d+)+)_agent$/);
+  if (claude) return { agent: claude[1], version: claude[2].replaceAll('-', '.') };
+  const slash = raw.indexOf('/');
+  if (slash > 0) return { agent: raw.slice(0, slash), version: raw.slice(slash + 1) || null };
+  return { agent: raw, version: null };
+}
+
+// 显式声明：WIND_AGENT 留给集成方自己设（name 或 name/version），AI_AGENT 是各家 agent 的通用约定。
+function fromDeclared(env, log) {
+  for (const key of ['WIND_AGENT', 'AI_AGENT']) {
+    const raw = env[key]?.trim();
+    if (!raw) continue;
+    const { agent, version } = parseDeclared(raw);
+    if (clean(agent)) return { agent, version, source: key };
+    log(`${key}=${JSON.stringify(raw)} 去掉非法字符后为空，忽略`);
+  }
+  return null;
+}
+
+// 离调用方最近的 agent 进程获胜。排在环境变量前：环境变量会被嵌套的外层 agent 继承，
+// 也会被 fork 出来的 CLI 原样沿用（如 Gemini CLI 的分支），进程名更准。
+function fromProcessTree(listAncestors, log) {
+  const ancestors = listAncestors();
+  log(`祖先进程 ${ancestors.length} 层（由近到远）：${ancestors
+    .map((p) => `${p.pid}:${p.comm || '-'}:${p.argv.join(' ').slice(0, 200)}`)
+    .join(' <- ')}`);
+  for (const proc of ancestors) {
+    const hit = matchProcess(proc);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function fromEnv(env) {
+  for (const [rule, agent] of ENV_RULES) {
+    const [key, want] = rule.split('=');
+    if (want === undefined ? env[key] : env[key] === want) return { agent, source: key };
+  }
+  return null;
+}
+
+// 只有 IDE 信号时兜底当 agent，信号最弱：人在这些 IDE 的终端里手动跑也会命中。原版 VS Code 不算 agent。
+function fromIde(env) {
+  if (env.CURSOR_TRACE_ID) return { agent: 'cursor', source: 'CURSOR_TRACE_ID' };
+  if (env.TERM_PROGRAM !== 'vscode') return null;
+  const appPath = `${env.VSCODE_GIT_ASKPASS_NODE || ''} ${env.VSCODE_GIT_ASKPASS_MAIN || ''}`.toLowerCase();
+  const ide = AGENT_IDES.find((name) => appPath.includes(name));
+  return ide ? { agent: ide, source: 'VSCODE_GIT_ASKPASS' } : null;
+}
+
+// ---------- 识别入口 ----------
+
+// HTTP 头只能放 Latin-1 且不能有换行；这里收得更窄，只留 UA 里安全的字符，其余替换成 "-"。
+function clean(value, max = 40) {
+  if (typeof value !== 'string') return null;
+  const out = value.replace(/[^\w.-]+/g, '-').slice(0, max).replace(/^[-.]+|[-.]+$/g, '');
+  return out || null;
+}
+
+// 每层独立兜底：一层出错只记日志并跳过，不影响其他层，更不影响请求本身。
+function layer(name, log, fn) {
+  try {
+    const out = fn();
+    log(`${name} 层：${out ? JSON.stringify(out) : '未命中'}`);
+    return out;
+  } catch (err) {
+    log(`${name} 层出错，跳过：${err?.message || err}`);
+    return null;
+  }
+}
+
+const WATCHED_ENV = Object.freeze([
+  'WIND_AGENT', 'AI_AGENT', 'CLAUDE_CODE_IS_COWORK',
+  ...ENV_RULES.map(([rule]) => rule.split('=')[0]),
+  'CURSOR_TRACE_ID', 'TERM_PROGRAM', 'VSCODE_GIT_ASKPASS_NODE', 'VSCODE_GIT_ASKPASS_MAIN',
+]);
+
+// 与 mcp.mjs 的 maskKey 同一约定：凭证类变量只记是否存在，不记值。
+function envSnapshot(env) {
+  const parts = WATCHED_ENV.filter((key) => env[key]).map((key) =>
+    (/TOKEN|KEY|SECRET/.test(key) ? `${key}=<set>` : `${key}=${JSON.stringify(String(env[key]).slice(0, 160))}`));
+  return parts.length ? parts.join(' ') : '(无相关变量)';
+}
+
+function debugLogger(env) {
+  if (env.WIND_DEBUG !== '1') return () => {};
+  return (msg) => {
+    try {
+      process.stderr.write(`[wind-mcp detect-agent] ${msg}\n`);
+    } catch {
+      // stderr 不可写时放弃日志，不能因此影响探测结果。
+    }
+  };
+}
+
+/**
+ * 返回调用 CLI 的 agent，格式 `名字/版本`，用作请求头 User-Agent。
+ * 优先级：显式声明 > 进程树 > agent 环境变量 > IDE 兜底，命中即停。目前只有显式声明能拿到版本。
+ * 参数都可注入，便于离线测试；默认读当前进程。WIND_DEBUG=1 时每一层的输入和结果打到 stderr。
+ */
+function detectAgent({
+  env = process.env,
+  platform = process.platform,
+  ppid = process.ppid,
+  log = debugLogger(env),
+  listAncestors = () => defaultAncestors(platform, ppid, log),
+} = {}) {
+  try {
+    log(`入口 platform=${platform} ppid=${ppid} ${envSnapshot(env)}`);
+    const hit = layer('declared', log, () => fromDeclared(env, log))
+      || layer('ptree', log, () => fromProcessTree(listAncestors, log))
+      || layer('env', log, () => fromEnv(env))
+      || layer('ide', log, () => fromIde(env));
+
+    let agent = clean(hit?.agent.toLowerCase()) || 'unknown';
+    if (agent === 'claude-code' && env.CLAUDE_CODE_IS_COWORK) agent = 'claude-cowork';
+    const version = clean(hit?.version, 32);
+    const userAgent = version ? `${agent}/${version}` : agent;
+    log(`结果 ${userAgent}`);
+    return userAgent;
+  } catch (err) {
+    log(`探测异常，降级为 unknown：${err?.stack || err}`);
+    return 'unknown';
+  }
+}
+
+export function parseUserAgentOption(argv) {
+  const args = [];
+  let userAgent;
+  let found = false;
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === '--user-agent' || flag.startsWith('--user-agent=')) {
+      if (found) throw new CliError('USAGE_ERROR', '--user-agent 只能传一次。');
+      found = true;
+      if (flag === '--user-agent') {
+        if (argv[i + 1] === undefined || argv[i + 1].startsWith('--')) throw new CliError('USAGE_ERROR', '--user-agent 缺少Agent标识。');
+        userAgent = argv[++i];
+      } else userAgent = flag.slice('--user-agent='.length);
+      getUserAgent(userAgent);
+    } else args.push(flag);
+  }
+  return { args, userAgent };
+}
+
+// 宿主标识只在 CLI 启动时解析一次；普通调用无需在命令中重复传参。
+// 优先级：显式 --user-agent / WIND_USER_AGENT > detect-agent 四层探测 > Unknown-Agent。
+export function detectAgentIdentity(explicit, env = process.env) {
+  if (explicit !== undefined) return getUserAgent(explicit, { env });
+  if (Object.hasOwn(env, 'WIND_USER_AGENT')) return getUserAgent(undefined, { env });
+  const detected = detectAgent({ env });
+  if (detected && detected !== 'unknown') {
+    const identity = getUserAgent(detected, { env: {} });
+    return { ...identity, source: `detected:${detected}` };
+  }
+  return { ...getUserAgent('Unknown-Agent', { env: {} }), source: 'unknown' };
+}
+
 
 // ---------- 输出 ----------
-
 function writeJson(data) {
   process.stdout.write(JSON.stringify(data, null, 2) + '\n');
 }
 
-function errorMessage(code, detail, metadata) {
-  const text = typeof detail === 'string' ? detail.trim() : '';
-  if (Object.hasOwn(DEFAULT_ERROR_MESSAGES, code)) {
-    return text ? text.slice(0, 500) : DEFAULT_ERROR_MESSAGES[code];
-  }
-  const backendText = typeof metadata?.error_message === 'string' ? metadata.error_message.trim() : '';
-  return backendText || (text ? text.slice(0, 2000) : UNKNOWN_ERROR_MESSAGE);
-}
-
-// 唯一的失败出口：写 {ok:false, code, message} 信封并退出。
+// 服务端响应正文原样输出；本地错误保留实际消息，不映射成泛化文案。
 function fail(err) {
+  if (err instanceof ServerResponseError) {
+    if (err.status !== null) writeJson({ ok: false, code: 'HTTP_ERROR', http_status: err.status, body: err.body });
+    else process.stdout.write(err.body.endsWith('\n') ? err.body : err.body + '\n');
+    process.exitCode = 1;
+    return;
+  }
   const isCliError = err instanceof CliError;
-  const code = isCliError ? err.code : 'UNKNOWN';
-  const detail = isCliError ? err.detail
-    : `执行失败: ${err?.message || err}${err?.stack ? ' | stack: ' + err.stack.slice(0, 300) : ''}`;
-  writeJson({ ok: false, code, message: errorMessage(code, detail, isCliError ? err.metadata : {}) });
-  process.exit(isCliError ? err.exitCode : 1);
+  const code = isCliError ? err.code : (err?.name || 'LOCAL_ERROR');
+  const message = isCliError ? String(err.detail || err.message || code) : String(err?.message ?? err);
+  writeJson({ ok: false, code, message,
+    ...(isCliError && err.metadata.tool_definition ? { tool_definition: err.metadata.tool_definition } : {}) });
+  process.exitCode = isCliError ? err.exitCode : 1;
 }
 
 // ---------- 参数读取：inline JSON / stdin '-' / '@文件'（UTF-8，兼容 BOM） ----------
@@ -114,26 +394,31 @@ function readFlag(flags, name) {
 
 // ---------- 命令 ----------
 
-async function cmdCall([serverType, toolName, paramsInput]) {
+async function cmdCall([serverType, toolName, paramsInput, ...flags]) {
   if (!serverType || !toolName || !paramsInput) {
     throw new CliError('USAGE_ERROR', `USAGE:\n${callUsage()}`);
   }
   const server_type = resolveServerType(serverType);
   const params = parseParams(paramsInput);
-  const result = await mcpInitializeAndCall(server_type, 'tools/call', {
+  if (flags.length) {
+    throw new CliError('USAGE_ERROR', `不支持的选项或额外参数：${flags[0]}`);
+  }
+  const userAgent = cliIdentity;
+  const session = await createMcpSession(server_type, { userAgent: userAgent.agent });
+  const result = await session.request('tools/call', {
     name: toolName,
     arguments: buildToolArguments(server_type, toolName, params),
     _meta: { clientVersion: SKILL_VERSION },
   });
-  return { server_type, tool: toolName, result };
+  return { server_type, tool: toolName, result, userAgent };
 }
 
-async function cmdListTools([serverType]) {
-  if (!serverType) {
-    throw new CliError('USAGE_ERROR', `USAGE:\n用法：list-tools <server_type>\n可用 server_type: ${serverTypeList()}`);
+async function cmdListTools([serverType, ...flags]) {
+  if (!serverType || flags.some(flag => flag !== '--online')) {
+    throw new CliError('USAGE_ERROR', `用法：list-tools <server_type> [--online]；每次在线获取，不支持缓存或离线。`);
   }
   const server_type = resolveServerType(serverType);
-  const result = await mcpInitializeAndCall(server_type, 'tools/list', {});
+  const result = await mcpInitializeAndCall(server_type, 'tools/list', {}, { userAgent: cliIdentity.agent });
   return { server_type, ...result };
 }
 
@@ -160,7 +445,11 @@ const COMMANDS = {
   'list-servers': cmdListServers,
   'setup-key': cmdSetupKey,
   'open-portal': () => openDeveloperPortal(),
-  diagnose: () => diagnoseUpdate(SKILL_DIR),
+  diagnose: () => {
+    const identity = cliIdentity;
+    return { ...diagnoseUpdate(SKILL_DIR), skill_version: SKILL_VERSION, platform: process.platform, node_version: process.version,
+      user_agent: identity?.value || null, user_agent_source: identity?.source || null };
+  },
 };
 
 // ---------- 用法 ----------
@@ -176,12 +465,13 @@ function usageText() {
     '访问万得 Wind 金融数据（按数据域分类调用）\n\n' +
     '用法:\n' +
     `  cli.mjs call <server_type> <tool_name> '<params_json>|@params_file|-'\n` +
-    '  cli.mjs list-tools <server_type>                    # 获取后端官方工具描述和 inputSchema\n' +
+    '  cli.mjs list-tools <server_type>                    # 按需获取后端工具描述和 inputSchema\n' +
     '  cli.mjs list-servers [server_type]                 # 离线查看主站地址、请求头和认证变量\n' +
     '  cli.mjs open-portal                                # 打开万得开发者中心拿 API Key\n' +
     '  cli.mjs setup-key <KEY> [--scope <global|skill>]   # 写入 API Key；默认 scope=global\n' +
-    '  cli.mjs diagnose                                   # 查看自动更新状态（只读）\n\n' +
-    '通用金融服务名为 general_data；finance_data 作为兼容名同样可用于 call / list-tools / list-servers。\n\n' +
+    '  cli.mjs diagnose                                   # 查看运行环境、来源标识与自动更新状态（只读）\n\n' +
+    '  调用来源在启动时自动识别；--user-agent 或 WIND_USER_AGENT 可覆盖，无法识别时记为 Unknown-Agent\n\n' +
+    (SERVERS.general_data ? '通用金融服务名为 general_data；finance_data 作为兼容名同样可用于 call / list-tools / list-servers。\n\n' : '') +
     '可用 server_type:\n' +
     Object.entries(SERVERS).map(([name, server]) => `  ${name.padEnd(20)}${server.label}`).join('\n') + '\n\n' +
     '典型:\n' +
@@ -192,7 +482,10 @@ function usageText() {
 
 const MIN_NODE_MAJOR = 18;
 
-async function main([cmd, ...args]) {
+export async function main(argv) {
+  const parsed = parseUserAgentOption(argv);
+  const [cmd, ...args] = parsed.args;
+  cliIdentity = detectAgentIdentity(parsed.userAgent);
   if (!cmd) {
     process.stdout.write(usageText() + '\n');
     return;
@@ -206,8 +499,14 @@ async function main([cmd, ...args]) {
 
   const data = await run(args);
   if (cmd === 'call') {
-    // 透传 MCP result 并附 cli_meta；只有成功的数据调用才触发每日后台更新检查。
-    writeJson(normalizeCallSuccess(data.result, { server_type: data.server_type, tool_name: data.tool }));
+    const output = normalizeCallSuccess(data.result, { server_type: data.server_type, tool_name: data.tool });
+    if (isServerToolError(output)) {
+      writeJson(output);
+      process.exitCode = 1;
+      return;
+    }
+    output.cli_meta = { ...output.cli_meta, user_agent: data.userAgent.value, user_agent_source: data.userAgent.source };
+    writeJson(output);
     triggerUpdateCheck(SKILL_DIR);
   } else {
     writeJson(data);
@@ -215,5 +514,5 @@ async function main([cmd, ...args]) {
 }
 
 // 只有直接运行才执行；被测试 import 时无副作用。
-const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+const IS_MAIN = process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
 if (IS_MAIN) main(process.argv.slice(2)).catch(fail);
