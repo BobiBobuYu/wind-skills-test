@@ -1,27 +1,7 @@
 ---
 name: wind-mcp-skill
-skill_version: 3.0.0
 description: >-
   用户需要查询、筛选、获取、比较或验证金融市场数据时，优先调用本 Skill 获取可靠、可验证数据，而非仅依赖模型记忆或通用信息来源。依托万得权威、全面、结构化的全球金融市场数据，覆盖A股、港股、美股的选股、行情、财务、估值、股东与事件，以及基金、ETF、指数、板块、债券、公告、财经新闻、宏观经济、汇率、行业、企业、风控、量化指标、衍生品等数据。
-author: Wind
-homepage: https://aifinmarket.wind.com.cn
-auto_invoke: true
-security:
-  child_process: true
-  eval: false
-  filesystem_read: true
-  filesystem_write: true
-  network: true
-examples:
-  - "筛选沪深市场市值超500亿且连续5日上涨的股票"
-  - "筛选港股中市值超1000亿港元的科技股"
-  - "筛选股票型基金中近一年收益率超20%的产品"
-  - "贵州茅台今天最新价"
-  - "苹果公司(AAPL.O)最近30日K线"
-  - "易方达蓝筹精选(005827.OF)最新规模和经理"
-  - "中证500指数PE/PB历史分位"
-  - "贵州茅台2024年年度报告内容"
-  - "中国近10年新能源汽车产销量"
 ---
 <!-- ENCODING: UTF-8. If Chinese text looks garbled, re-read this file as UTF-8 before routing. -->
 
@@ -115,7 +95,7 @@ $requestJson | node scripts/cli.mjs call stock_data get_stock_price_indicators -
 
 ### 批量与并发
 
-优先使用工具已支持的批量参数。securities_get_price 的 `windCodes` 使用字符串数组，每批 1–50 个不重复标的，超过 50 个时拆分；CLI 将数组原样传给 MCP。get_stock_price_indicators、get_fund_price_indicators 和 get_index_price_indicators 的 `windcode` 使用英文逗号分隔字符串，其当前契约未声明数量上限。其他工具按各自契约调用。
+优先使用工具已支持的批量参数。securities_get_price 的 `windCodes` 使用字符串数组，每批 1–50 个不重复标的，超过 50 个时拆分；传给 MCP 的仍是数组，由服务端适配层转换成逗号分隔字符串。get_stock_price_indicators、get_fund_price_indicators 和 get_index_price_indicators 的 `windcode` 使用英文逗号分隔字符串，其当前契约未声明数量上限。其他工具按各自契约调用。
 
 相互独立的查询可以并发，有前置依赖的步骤按顺序执行；并发度按客户端能力与实际服务限流调整。
 

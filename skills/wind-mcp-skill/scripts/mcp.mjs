@@ -131,7 +131,7 @@ export function serverListEntries(filter) {
 // ------------------ 凭证：读取顺序、setup-key 写入、open-portal ------------------
 // Key 不得出现在源码、日志或错误信息里；对外只暴露 maskKey 的结果。
 
-const PORTAL_URL = 'https://market.windalice.com/#/enterprise/dashboard';
+const PORTAL_URL = 'https://market.windalice.com/#/user/overview';
 
 const globalConfigFile = () => join(homedir(), '.wind-aifinmarket', 'config');
 const localConfigFile = () => join(SKILL_DIR, 'config.json');
@@ -245,7 +245,7 @@ export function writeApiKey({ key, scope }) {
   return { scope, path: file, key_masked: maskKey(key), next: '现在可以重试原 Wind 调用' };
 }
 
-// open-portal：按平台用系统默认浏览器打开万得开发者中心；启动失败时抛错并给出手动地址。
+// open-portal：按平台用系统默认浏览器打开个人版用户页面；启动失败时抛错并给出手动地址。
 export async function openDeveloperPortal() {
   const platform = process.platform;
   const [bin, args] = platform === 'darwin' ? ['open', [PORTAL_URL]]
@@ -270,7 +270,7 @@ export async function openDeveloperPortal() {
     url: PORTAL_URL,
     platform,
     spawn_command: `${bin} ${args.join(' ')}`,
-    flow_note: '登录后进入企业版仪表盘获取 API Key。',
+    flow_note: '登录后进入个人版用户页面获取 API Key。',
     fallback_message: `如果浏览器没有自动弹出，请手动访问：${PORTAL_URL}`,
   };
 }

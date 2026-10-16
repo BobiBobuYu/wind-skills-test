@@ -467,7 +467,7 @@ function usageText() {
     `  cli.mjs call <server_type> <tool_name> '<params_json>|@params_file|-'\n` +
     '  cli.mjs list-tools <server_type>                    # 按需获取后端工具描述和 inputSchema\n' +
     '  cli.mjs list-servers [server_type]                 # 离线查看主站地址、请求头和认证变量\n' +
-    '  cli.mjs open-portal                                # 打开万得开发者中心拿 API Key\n' +
+    '  cli.mjs open-portal                                # 打开个人版用户页面获取 API Key\n' +
     '  cli.mjs setup-key <KEY> [--scope <global|skill>]   # 写入 API Key；默认 scope=global\n' +
     '  cli.mjs diagnose                                   # 查看运行环境、来源标识与自动更新状态（只读）\n\n' +
     '  调用来源在启动时自动识别；--user-agent 或 WIND_USER_AGENT 可覆盖，无法识别时记为 Unknown-Agent\n\n' +

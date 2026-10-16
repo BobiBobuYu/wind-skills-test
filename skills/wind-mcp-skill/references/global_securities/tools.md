@@ -7,7 +7,7 @@
 - 参数名区分大小写。`securities_get_price` 使用 **`windCodes: string[]`**；`securities_get_financials`、`securities_get_trend`、`securities_get_profile` 使用 **`windCode: string`**，查询单个标的。
 - 身份明确时直接查询，不强制 lookup。代码例子只展示格式，不可据此猜测其他标的的后缀。
 - 服务支持的品种不等于每个标的、字段、历史时点都可返回；以实际结果为准。
-- `securities_get_price` 数组至少 1 项、最多 50 项且不重复；单标的同样传数组。CLI 保持 MCP 入参为数组。其他参数按各工具的 schema 填写。
+- `securities_get_price` 数组至少 1 项、最多 50 项且不重复；单标的同样传数组。MCP 入参保持数组，服务端适配层负责拼接逗号字符串。其他参数按各工具的 schema 填写。
 
 ## `securities_entities_lookup`
 
