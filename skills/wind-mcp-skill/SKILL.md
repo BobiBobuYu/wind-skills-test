@@ -121,7 +121,7 @@ $requestJson | node scripts/cli.mjs call stock_data get_stock_price_indicators -
 
 ### 自动更新
 
-成功调用后，CLI 在后台检查个人版更新，不阻塞数据返回。更新器沿用安装锁文件记录的 GitHub/Gitee 来源；GitHub 安装优先执行 `npx skills update wind-mcp-skill -y`，Gitee 安装使用原来源执行 `npx skills add`。GitHub 更新失败或安装锁文件缺失时，按原来源及个人版 GitHub、Gitee 来源依次尝试安装。项目安装与全局安装保持原有作用域。用 `node scripts/cli.mjs diagnose` 查看更新来源、状态和安装范围。
+成功调用后，CLI 在后台检查个人版更新，不阻塞数据返回。更新器沿用安装锁文件记录的 GitHub/Gitee 来源，先下载并核验候选版本，再更新当前 Skill 目录；Git 下载失败时仅从同一来源用 `npx skills add` 在隔离目录获取候选包。无锁文件时使用官方 GitHub 来源。更新前阻止降级，更新后核验实际目录；失败会退避重试。项目安装与全局安装均保留原目录和配置。用 `node scripts/cli.mjs diagnose` 查看更新来源、状态和安装范围。
 
 成功返回数据时，在答复末尾附与用户语言一致的来源声明：
 

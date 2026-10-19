@@ -1,82 +1,42 @@
 #!/usr/bin/env node
- // Daily background updater for wind-mcp-skill.
-// The CLI starts this script detached; failures are recorded but never block data calls.
+// Daily background updater for the personal Wind Skill.
+// Download and validate the locked source before replacing the loaded directory.
 
 import {
-  closeSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
+  closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync,
+  openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import {
-  createHash
-} from 'node:crypto';
-import {
-  spawn,
-  spawnSync
-} from 'node:child_process';
-import {
-  homedir
-} from 'node:os';
-import {
-  basename,
-  dirname,
-  join,
-  resolve
-} from 'node:path';
-import {
-  fileURLToPath
-} from 'node:url';
+import { createHash } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const IS_MAIN = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-const SKILL_DIR = IS_MAIN && process.argv[2] ? resolve(process.argv[2]) : dirname(SCRIPT_DIR);
-const SKILL_SCRIPTS_DIR = join(SKILL_DIR, 'scripts');
-const LOCK_FILE = join(SKILL_SCRIPTS_DIR, 'update.lock');
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const IS_MAIN = Boolean(process.argv[1] && resolve(process.argv[1]) === SCRIPT_PATH);
+const SKILL_DIR = IS_MAIN && process.argv[2] ? resolve(process.argv[2]) : dirname(dirname(SCRIPT_PATH));
 const SKILL_NAME = basename(SKILL_DIR);
-const DEFAULT_SOURCES = [
-  'https://github.com/Wind-Alice/AliceMarket.git',
-  'https://gitee.com/WindAlice/AliceMarket.git',
-];
-
-// Imported by cli.mjs after a successful call. Keep the updater independent
-// of the live Skill directory while npx replaces files in that directory.
-export function triggerUpdateCheck() {
-  try {
-    if (successfulToday()) return;
-    writeStateUsage();
-    const cacheDir = join(homedir(), '.cache', 'wind-aifinmarket');
-    mkdirSync(cacheDir, { recursive: true });
-    const runnerPath = join(cacheDir, `update-check-${SKILL_NAME}-${process.pid}.mjs`);
-    copyFileSync(fileURLToPath(import.meta.url), runnerPath);
-    const child = spawn(process.execPath, [runnerPath, SKILL_DIR], {
-      detached: true, stdio: 'ignore', windowsHide: true,
-    });
-    child.on('error', () => {});
-    child.unref();
-  } catch {
-    // A data call must not fail because the background updater cannot start.
-  }
-}
+const STATE_FILE = join(SKILL_DIR, 'scripts', 'update-state.json');
+const CACHE_DIR = join(homedir(), '.cache', 'wind-aifinmarket');
+const LOCK_FILE = join(CACHE_DIR, 'locks', `${createHash('sha256').update(normalized(SKILL_DIR)).digest('hex').slice(0, 24)}.lock`);
+const DEFAULT_SOURCE = 'https://github.com/Wind-Alice/AliceMarket.git';
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const QUIET_MS = 10 * 1000;
 const MAX_WAIT_MS = 10 * 60 * 1000;
+const RETRY_BASE_MS = 30 * 60 * 1000;
+const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 
-function normalizePath(value) {
-  const normalized = resolve(value).replace(/\\/g, '/');
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+function normalized(path) {
+  const value = resolve(path).replace(/\\/g, '/');
+  return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
 function updateScope() {
-  const globalRoot = normalizePath(join(homedir(), '.agents', 'skills'));
-  const skillDir = normalizePath(SKILL_DIR);
-  return skillDir.startsWith(`${globalRoot}/`) ? 'global' : 'project';
+  const override = String(process.env.WIND_SKILL_INSTALL_SCOPE || '').trim().toLowerCase();
+  if (override === 'global' || override === 'project') return override;
+  const rel = relative(homedir(), SKILL_DIR).split(sep);
+  return rel.length === 3 && rel[0].startsWith('.') && rel[1] === 'skills' ? 'global' : 'project';
 }
 
 function projectRoot() {
@@ -85,510 +45,351 @@ function projectRoot() {
 
 function uniquePaths(paths) {
   const seen = new Set();
-  const result = [];
-
-  for (const path of paths.filter(Boolean).map((value) => resolve(value))) {
-    const key = normalizePath(path);
-    if (seen.has(key)) continue;
+  return paths.filter(Boolean).map((path) => resolve(path)).filter((path) => {
+    const key = normalized(path);
+    if (seen.has(key)) return false;
     seen.add(key);
-    result.push(path);
-  }
-
-  return result;
+    return true;
+  });
 }
 
-function updateCommand() {
-  const command = ['npx', 'skills', 'update', SKILL_NAME, '-y'];
-  if (updateScope() === 'global') command.push('-g');
-  return command;
-}
-
-function projectLockCandidates() {
-  const roots = [projectRoot(), process.cwd(), process.env.INIT_CWD];
-  let current = resolve(SKILL_DIR);
-
-  while (true) {
-    roots.push(current);
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-
-  return uniquePaths(
-    roots.filter(Boolean).map((root) => join(root, 'skills-lock.json')),
-  );
-}
-
-function globalLockCandidates() {
-  const xdg = process.env.XDG_STATE_HOME;
-  return uniquePaths([
-    xdg ? join(xdg, 'skills', '.skill-lock.json') : null,
+function lockCandidates() {
+  const global = [
+    process.env.XDG_STATE_HOME && join(process.env.XDG_STATE_HOME, 'skills', '.skill-lock.json'),
     join(homedir(), '.agents', '.skill-lock.json'),
-  ]);
-}
-
-function lockFileCandidates() {
-  const globalCandidates = globalLockCandidates();
-  const projectCandidates = projectLockCandidates();
-
-  return updateScope() === 'global' ?
-    uniquePaths([...globalCandidates, ...projectCandidates]) :
-    uniquePaths([...projectCandidates, ...globalCandidates]);
+  ];
+  const project = [projectRoot(), process.cwd(), process.env.INIT_CWD]
+    .filter(Boolean).map((root) => join(root, 'skills-lock.json'));
+  const agentsRoot = `${normalized(join(homedir(), '.agents', 'skills'))}/`;
+  const standardGlobal = updateScope() === 'global' && normalized(SKILL_DIR).startsWith(agentsRoot);
+  return uniquePaths(standardGlobal ? [...global, ...project] : [...project, ...global]);
 }
 
 function readLockInfo() {
-  const candidates = lockFileCandidates();
-  let firstExistingFile = null;
-
+  const candidates = lockCandidates();
+  let firstExisting = null;
   for (const file of candidates) {
     try {
       if (!existsSync(file)) continue;
-      firstExistingFile ||= file;
-
-      const data = JSON.parse(readFileSync(file, 'utf8'));
-      const entry = data?.skills?.[SKILL_NAME] || null;
-      if (entry) return {
-        file,
-        entry,
-        candidates
-      };
+      firstExisting ||= file;
+      const entry = JSON.parse(readFileSync(file, 'utf8'))?.skills?.[SKILL_NAME];
+      if (entry) return { file, entry };
     } catch {}
   }
-
-  return {
-    file: firstExistingFile || candidates[0] || null,
-    entry: null,
-    candidates,
-  };
-}
-
-function readLockEntry() {
-  return readLockInfo().entry;
-}
-
-function isGiteeSource(entry) {
-  const values = [entry?.sourceType, entry?.source, entry?.sourceUrl]
-    .filter(Boolean)
-    .map((value) => String(value).toLowerCase());
-
-  return values.some((value) => value.includes('gitee'));
+  return { file: firstExisting || candidates[0] || null, entry: null };
 }
 
 function sourceUrl(entry) {
-  if (!entry) return null;
+  if (!entry) return DEFAULT_SOURCE;
   if (entry.sourceUrl) return entry.sourceUrl;
-
-  if (entry.sourceType === 'github' && /^[^/\s]+\/[^/\s]+$/.test(entry.source || '')) {
-    return `https://github.com/${entry.source}.git`;
+  const source = String(entry.source || '');
+  if (entry.sourceType === 'github' && /^[^/\s]+\/[^/\s]+$/.test(source)) {
+    return `https://github.com/${source}.git`;
   }
-
-  if (
-    (entry.sourceType === 'gitee' || entry.sourceType === 'git') &&
-    /^[^/\s]+\/[^/\s]+$/.test(entry.source || '')
-  ) {
-    return `https://gitee.com/${entry.source}.git`;
+  if ((entry.sourceType === 'gitee' || entry.sourceType === 'git') &&
+      /^[^/\s]+\/[^/\s]+$/.test(source)) {
+    return `https://gitee.com/${source}.git`;
   }
-
-  return entry.source || null;
-}
-
-function updateEnv() {
-  return {
-    ...process.env
-  };
-}
-
-function remoteHead(entry) {
-  const source = sourceUrl(entry);
-  if (!source) return null;
-
-  try {
-    const result = spawnSync('git', ['ls-remote', source, 'HEAD'], {
-      encoding: 'utf8',
-      env: updateEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 60 * 1000,
-      windowsHide: true,
-    });
-
-    if (result.status !== 0) return null;
-    const head = (result.stdout || '').trim().split(/\s+/)[0];
-    return /^[0-9a-f]{40}$/i.test(head) ? head : null;
-  } catch {
-    return null;
-  }
-}
-
-function addCommandForSource(source) {
-  if (!source) return null;
-  // Windows executes this command through cmd.exe; never pass shell metacharacters from a lock file.
-  if (!/^[A-Za-z0-9_./:@-]+$/.test(source)) return null;
-
-  const command = ['npx', 'skills', 'add', source, '--skill', SKILL_NAME, '-y'];
-  if (updateScope() === 'global') command.push('-g');
-  return command;
-}
-
-function addCommand(entry) {
-  return addCommandForSource(sourceUrl(entry));
-}
-
-function fallbackAddCommands(entry) {
-  const sources = [sourceUrl(entry), ...DEFAULT_SOURCES];
-  const seen = new Set();
-
-  return sources
-    .filter(Boolean)
-    .filter((source) => {
-      const key = String(source).toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map(addCommandForSource)
-    .filter(Boolean);
-}
-
-function commandForUpdate() {
-  const entry = readLockEntry();
-
-  if (isGiteeSource(entry)) {
-    const command = addCommand(entry);
-    if (command) {
-      return {
-        command,
-        method: 'add',
-        sourceType: entry?.sourceType || null,
-      };
-    }
-  }
-
-  return {
-    command: updateCommand(),
-    method: 'update',
-    sourceType: entry?.sourceType || null,
-  };
-}
-
-function updateStateFile() {
-  return join(SKILL_SCRIPTS_DIR, 'update-state.json');
-}
-
-function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  return source || DEFAULT_SOURCE;
 }
 
 function readState() {
-  try {
-    const stateFile = updateStateFile();
-    if (!existsSync(stateFile)) return null;
-    return JSON.parse(readFileSync(stateFile, 'utf8'));
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return null; }
 }
 
-function successfulToday() {
-  const state = readState();
+function todayKey() { return new Date().toISOString().slice(0, 10); }
+
+function retryPending(state = readState()) {
+  return state?.status === 'failed' && Number.isFinite(Date.parse(state.nextRetryAt)) &&
+    Date.now() < Date.parse(state.nextRetryAt);
+}
+
+function successfulToday(state = readState()) {
   return state?.date === todayKey() && state.status === 'success';
-}
-
-function writeStateUsage() {
-  const stateFile = updateStateFile();
-  mkdirSync(dirname(stateFile), { recursive: true });
-  writeFileSync(stateFile, JSON.stringify({
-    ...(readState() || {}),
-    lastUsedAt: new Date().toISOString(),
-    lastUsedPid: process.pid,
-  }, null, 2) + '\n');
-}
-
-export function diagnoseUpdate() {
-  const lock = readLockInfo();
-  const source = sourceUrl(lock.entry);
-  return {
-    update_scope: updateScope(),
-    update_channel: 'personal',
-    auto_update: 'enabled',
-    update_source: source || DEFAULT_SOURCES[0],
-    fallback_sources: fallbackAddCommands(lock.entry).map((command) => command[3]),
-    update_state_file: updateStateFile(),
-    update_state: readState(),
-    next_update_needed: !successfulToday(),
-    lock_file: lock.file,
-    lock_found: Boolean(lock.entry),
-    skill_directory: SKILL_DIR,
-    project_directory: updateScope() === 'global' ? null : projectRoot(),
-  };
 }
 
 function alreadyUpdatedToday() {
   const state = readState();
-  if (!state || state.date !== todayKey() || state.status !== 'success') return false;
-
-  const entry = readLockEntry();
-  if (!entry || isGiteeSource(entry)) return true;
-
-  const head = remoteHead(entry);
-  return !head || head === state.lastAppliedRemoteHead;
+  if (!successfulToday(state)) return false;
+  const lock = readLockInfo();
+  if (!lock.entry || /gitee/i.test(sourceUrl(lock.entry)) || !state.lastAppliedRemoteHead) return true;
+  const head = spawnSync('git', ['ls-remote', sourceUrl(lock.entry), 'HEAD'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60 * 1000, windowsHide: true,
+  });
+  if (head.status !== 0) return true;
+  const remote = String(head.stdout || '').trim().split(/\s+/)[0];
+  return !/^[0-9a-f]{40}$/i.test(remote) || remote === state.lastAppliedRemoteHead;
 }
 
-function lastUsedAt() {
+function writeState(patch) {
+  const lock = readLockInfo();
+  const state = {
+    ...(readState() || {}), date: todayKey(), scope: updateScope(),
+    lockFile: lock.file, lockFound: Boolean(lock.entry),
+    source: sourceUrl(lock.entry), updatedAt: new Date().toISOString(), ...patch,
+  };
+  mkdirSync(dirname(STATE_FILE), { recursive: true });
+  writeFileSync(STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+export function diagnoseUpdate() {
+  const lock = readLockInfo();
+  const state = readState();
+  const source = sourceUrl(lock.entry);
+  return {
+    update_scope: updateScope(), update_channel: 'personal', auto_update: 'enabled',
+    update_source: source, fallback_sources: [source], update_state_file: STATE_FILE,
+    update_state: state, next_update_needed: !successfulToday(state) && !retryPending(state),
+    lock_file: lock.file, lock_found: Boolean(lock.entry), skill_directory: SKILL_DIR,
+    project_directory: updateScope() === 'global' ? null : projectRoot(),
+  };
+}
+
+export function triggerUpdateCheck() {
   try {
-    const state = readState();
-    const timestamp = new Date(state?.lastUsedAt).getTime();
-    return Number.isFinite(timestamp) ? timestamp : 0;
+    if (successfulToday() || retryPending()) return;
+    writeState({ lastUsedAt: new Date().toISOString(), lastUsedPid: process.pid });
+    mkdirSync(CACHE_DIR, { recursive: true });
+    const runner = join(CACHE_DIR, `update-check-${SKILL_NAME}-${process.pid}.mjs`);
+    copyFileSync(SCRIPT_PATH, runner);
+    const child = spawn(process.execPath, [runner, SKILL_DIR, '--cleanup-runner'], {
+      detached: true, stdio: 'ignore', windowsHide: true,
+    });
+    child.on('error', () => { try { unlinkSync(runner); } catch {} });
+    child.unref();
   } catch {
-    return 0;
+    // Updating must never block a market-data call.
+  }
+}
+
+function acquireLock() {
+  mkdirSync(dirname(LOCK_FILE), { recursive: true });
+  try {
+    if (Date.now() - statSync(LOCK_FILE).mtimeMs > LOCK_STALE_MS) unlinkSync(LOCK_FILE);
+  } catch {}
+  try { return openSync(LOCK_FILE, 'wx'); } catch { return null; }
+}
+
+function releaseLock(fd) {
+  try { closeSync(fd); } catch {}
+  try { unlinkSync(LOCK_FILE); } catch {}
+}
+
+function versionOf(dir) {
+  for (const file of ['scripts/mcp.mjs', 'scripts/cli.mjs']) {
+    try {
+      const match = readFileSync(join(dir, file), 'utf8').match(/\bSKILL_VERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]/);
+      if (match) return match[1];
+    } catch {}
+  }
+  throw new Error(`SKILL_VERSION missing in ${dir}`);
+}
+
+function compareVersions(a, b) {
+  const left = a.split('.').map(Number);
+  const right = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] - right[i];
+  return 0;
+}
+
+function packageHash(dir) {
+  const hash = createHash('sha256');
+  const files = [];
+  function walk(folder) {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      const full = join(folder, entry.name);
+      const rel = relative(dir, full).replace(/\\/g, '/');
+      if (rel === 'config.json' || rel === 'scripts/update-state.json' || rel === 'scripts/update.lock') continue;
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) files.push({ full, rel });
+    }
+  }
+  walk(dir);
+  files.sort((a, b) => a.rel.localeCompare(b.rel));
+  for (const file of files) {
+    hash.update(file.rel); hash.update('\0'); hash.update(readFileSync(file.full)); hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+function candidatePath(cloneDir, entry) {
+  const skillPath = String(entry?.skillPath || `skills/${SKILL_NAME}/SKILL.md`).replace(/\\/g, '/');
+  const subdir = skillPath.endsWith('/SKILL.md') ? skillPath.slice(0, -9) : skillPath;
+  if (isAbsolute(subdir) || subdir.split('/').some((part) => part === '..')) {
+    throw new Error('Unsafe skillPath in lock file');
+  }
+  const candidate = resolve(cloneDir, subdir);
+  if (!normalized(candidate).startsWith(`${normalized(cloneDir)}/`)) {
+    throw new Error('Skill path escapes downloaded repository');
+  }
+  if (!existsSync(join(candidate, 'SKILL.md'))) throw new Error(`Skill missing at ${subdir}`);
+  return candidate;
+}
+
+function cloneSource(source, dest) {
+  if (!/^(https?:\/\/|ssh:\/\/|git@|file:\/\/)/i.test(source)) {
+    throw new Error('Unsupported Skill source URL');
+  }
+  const result = spawnSync('git', ['clone', '--depth', '1', '--quiet', source, dest], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10 * 60 * 1000,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`git clone failed: ${(result.stderr || result.error?.message || '').trim().slice(-500)}`);
+  }
+  const head = spawnSync('git', ['-C', dest, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  });
+  return head.status === 0 ? head.stdout.trim() : null;
+}
+
+function installSourceInStaging(source, fetchDir) {
+  // Preserve the 2.0.4 add fallback for Git credentials and transport issues,
+  // while keeping installation confined to a temporary project and one source.
+  if (!/^[A-Za-z0-9_./:@%-]+$/.test(source)) {
+    throw new Error('Source URL cannot be passed safely to the skills CLI');
+  }
+  const command = ['npx', 'skills', 'add', source, '--skill', SKILL_NAME, '--agent', 'codex', '-y'];
+  const isWin = process.platform === 'win32';
+  const result = spawnSync(isWin ? 'cmd.exe' : 'npx',
+    isWin ? ['/d', '/s', '/c', command.join(' ')] : command.slice(1), {
+      cwd: fetchDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10 * 60 * 1000, windowsHide: true,
+    });
+  const candidate = join(fetchDir, '.agents', 'skills', SKILL_NAME);
+  if (!existsSync(join(candidate, 'SKILL.md'))) {
+    throw new Error(`Same-source skills add failed: ${(result.stderr || result.error?.message || result.stdout || '').trim().slice(-500)}`);
+  }
+  return candidate;
+}
+
+function replaceTarget(candidate) {
+  const target = realpathSync(SKILL_DIR);
+  const parent = dirname(target);
+  const work = mkdtempSync(join(parent, `.${SKILL_NAME}-update-`));
+  const staged = join(work, 'new');
+  const backup = join(work, 'old');
+  let oldMoved = false;
+  let newMoved = false;
+  try {
+    cpSync(candidate, staged, { recursive: true });
+    for (const rel of ['config.json', 'scripts/update-state.json']) {
+      const oldFile = join(target, rel);
+      if (existsSync(oldFile)) {
+        mkdirSync(dirname(join(staged, rel)), { recursive: true });
+        copyFileSync(oldFile, join(staged, rel));
+      }
+    }
+    renameSync(target, backup);
+    oldMoved = true;
+    renameSync(staged, target);
+    newMoved = true;
+    if (versionOf(target) !== versionOf(candidate) || packageHash(target) !== packageHash(candidate)) {
+      throw new Error('Installed directory failed post-update verification');
+    }
+  } catch (error) {
+    if (oldMoved) {
+      if (newMoved) rmSync(target, { recursive: true, force: true });
+      renameSync(backup, target);
+      oldMoved = false;
+    }
+    throw error;
+  } finally {
+    // work is a newly created sibling of the exact, resolved target directory.
+    if (normalized(work).startsWith(`${normalized(parent)}/`)) {
+      rmSync(work, { recursive: true, force: true });
+    }
   }
 }
 
 function quietLongEnough() {
-  const last = lastUsedAt();
-  return last === 0 || Date.now() - last >= QUIET_MS;
-}
-
-function sleep(ms) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+  const last = Date.parse(readState()?.lastUsedAt);
+  return !Number.isFinite(last) || Date.now() - last >= QUIET_MS;
 }
 
 async function waitForQuietWindow() {
-  const startedAt = Date.now();
-
+  const started = Date.now();
   while (!quietLongEnough()) {
-    if (Date.now() - startedAt >= MAX_WAIT_MS) return false;
-    await sleep(QUIET_MS);
+    if (Date.now() - started >= MAX_WAIT_MS) return false;
+    await new Promise((done) => setTimeout(done, QUIET_MS));
   }
-
   return true;
 }
 
-function acquireLock() {
-  try {
-    if (!existsSync(SKILL_SCRIPTS_DIR)) mkdirSync(SKILL_SCRIPTS_DIR, {
-      recursive: true
-    });
-
-    try {
-      const st = statSync(LOCK_FILE);
-      if (Date.now() - st.mtimeMs > LOCK_STALE_MS) unlinkSync(LOCK_FILE);
-    } catch {}
-
-    return openSync(LOCK_FILE, 'wx');
-  } catch {
-    return null;
-  }
-}
-
-function releaseLock(fd) {
-  try {
-    if (fd !== null) closeSync(fd);
-  } catch {}
-
-  try {
-    unlinkSync(LOCK_FILE);
-  } catch {}
-}
-
-function writeState(patch) {
-  const {
-    command,
-    method,
-    sourceType
-  } = commandForUpdate();
-  const lock = readLockInfo();
-  const stateFile = updateStateFile();
-  const state = {
-    ...(readState() || {}),
-    date: todayKey(),
-    scope: updateScope(),
-    lockFile: lock.file,
-    lockFound: Boolean(lock.entry),
-    command: command.join(' '),
-    method,
-    sourceType,
-    updatedAt: new Date().toISOString(),
-    ...patch,
-  };
-
-  mkdirSync(dirname(stateFile), {
-    recursive: true
-  });
-  writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`);
-}
-
-function hashSkillDir() {
-  const hash = createHash('sha256');
-  const files = [];
-
-  function walk(dir) {
-    for (const entry of readdirSync(dir, {
-        withFileTypes: true
-      })) {
-      const full = join(dir, entry.name);
-      const rel = full.slice(SKILL_DIR.length + 1).replace(/\\/g, '/');
-
-      if (rel === 'config.json' || rel === 'scripts/update-state.json') continue;
-      if (entry.isDirectory()) {
-        walk(full);
-      } else if (entry.isFile()) {
-        files.push({
-          full,
-          rel
-        });
-      }
-    }
-  }
-
-  walk(SKILL_DIR);
-  files.sort((a, b) => a.rel.localeCompare(b.rel));
-
-  for (const file of files) {
-    hash.update(file.rel);
-    hash.update('\0');
-    hash.update(readFileSync(file.full));
-    hash.update('\0');
-  }
-
-  return hash.digest('hex');
-}
-
-function runSkillCommand(command, method) {
-  const cwd = updateScope() === 'global' ? homedir() : projectRoot();
-  const isWin = process.platform === 'win32';
-  const bin = isWin ? 'cmd.exe' : 'npx';
-  const args = isWin ? ['/d', '/s', '/c', command.join(' ')] : command.slice(1);
-  const result = spawnSync(bin, args, {
-    cwd,
-    encoding: 'utf8',
-    env: updateEnv(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 10 * 60 * 1000,
-    windowsHide: true,
-  });
-  const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
-  const failedByOutput =
-    /failed to (update|add|install)|No installed skills found matching/i.test(output);
-
-  return {
-    command,
-    method,
-    result,
-    output,
-    ok: result.status === 0 && !failedByOutput,
-    error: result.error ?
-      String(result.error.message || result.error) :
-      failedByOutput ?
-      `npx skills ${method} reported failure` :
-      null,
-  };
+function markFailure(error) {
+  const previous = readState();
+  const count = Math.min(5, (Number(previous?.failureCount) || 0) + 1);
+  const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (count - 1));
+  writeState({ status: 'failed', finishedAt: new Date().toISOString(),
+    failureCount: count, nextRetryAt: new Date(Date.now() + delay).toISOString(),
+    error: String(error?.message || error).slice(0, 1000), changed: false });
 }
 
 function runUpdate() {
-  const entry = readLockEntry();
-  const {
-    command,
-    method,
-    sourceType
-  } = commandForUpdate();
-  const state = readState();
-  const beforeRemoteHead = remoteHead(entry);
-  const remoteChanged = Boolean(beforeRemoteHead && beforeRemoteHead !== state?.lastAppliedRemoteHead);
-  const beforeHash = hashSkillDir();
-  let attempt = runSkillCommand(command, method);
-  let usedFallback = false;
-  let fallbackReason = null;
-
-  if (!attempt.ok || (method === 'update' && remoteChanged && beforeHash === hashSkillDir())) {
-    const fallbackCommands = fallbackAddCommands(entry)
-      .filter((fallbackCommand) => fallbackCommand.join('\0') !== command.join('\0'));
-
-    if (fallbackCommands.length > 0) {
-      fallbackReason = entry ?
-        attempt.ok ?
-        'remote changed but update did not change local files' :
-        `${method} failed` :
-        'lock entry missing or update did not find installed skill';
-      const outputs = [attempt.output].filter(Boolean);
-      usedFallback = true;
-
-      for (const fallbackCommand of fallbackCommands) {
-        const fallback = runSkillCommand(fallbackCommand, 'add');
-        outputs.push(fallback.output);
-        attempt = {
-          ...fallback,
-          output: outputs.filter(Boolean).join('\n\n--- fallback: npx skills add ---\n\n'),
-          error: fallback.ok ? null : fallback.error || attempt.error,
-        };
-        if (fallback.ok) break;
-      }
+  const lock = readLockInfo();
+  const source = sourceUrl(lock.entry);
+  const previous = versionOf(SKILL_DIR);
+  const beforeHash = packageHash(SKILL_DIR);
+  const fetchDir = mkdtempSync(join(tmpdir(), 'wind-skill-fetch-'));
+  try {
+    const cloneDir = join(fetchDir, 'repo');
+    let head = null;
+    let candidate;
+    let method = 'verified-git-clone';
+    try {
+      head = cloneSource(source, cloneDir);
+      candidate = candidatePath(cloneDir, lock.entry);
+    } catch {
+      candidate = installSourceInStaging(source, fetchDir);
+      method = 'verified-skills-add';
     }
+    const next = versionOf(candidate);
+    if (compareVersions(next, previous) < 0) {
+      throw new Error(`Downgrade blocked: installed ${previous}, source offers ${next}`);
+    }
+    const sourceHash = packageHash(candidate);
+    const changed = sourceHash !== beforeHash;
+    if (changed) replaceTarget(candidate);
+    const installed = versionOf(SKILL_DIR);
+    const afterHash = packageHash(SKILL_DIR);
+    if (installed !== next || afterHash !== sourceHash) {
+      throw new Error('Loaded Skill directory does not match downloaded source');
+    }
+    writeState({ status: 'success', finishedAt: new Date().toISOString(),
+      failureCount: 0, nextRetryAt: null, error: null, changed,
+      previousVersion: previous, installedVersion: installed,
+      remoteHead: head, lastAppliedRemoteHead: head,
+      beforeHash, afterHash, method });
+  } finally {
+    rmSync(fetchDir, { recursive: true, force: true });
   }
-
-  const afterHash = hashSkillDir();
-
-  writeState({
-    status: attempt.ok ? 'success' : 'failed',
-    finishedAt: new Date().toISOString(),
-    exitCode: attempt.result.status,
-    method: attempt.method,
-    usedFallback,
-    fallbackReason,
-    sourceType,
-    command: attempt.command.join(' '),
-    error: attempt.error,
-    remoteHead: beforeRemoteHead,
-    remoteChanged,
-    lastAppliedRemoteHead: attempt.ok ?
-      beforeRemoteHead || state?.lastAppliedRemoteHead || null :
-      state?.lastAppliedRemoteHead || null,
-    changed: beforeHash !== afterHash,
-    beforeHash,
-    afterHash,
-    output: attempt.output.slice(-2000),
-  });
 }
 
 async function main() {
-  if (alreadyUpdatedToday()) return;
-
+  if (alreadyUpdatedToday() || retryPending()) return;
   const fd = acquireLock();
   if (fd === null) return;
-
   try {
-    if (alreadyUpdatedToday()) return;
-
+    if (alreadyUpdatedToday() || retryPending()) return;
     if (!(await waitForQuietWindow())) {
-      writeState({
-        status: 'deferred',
-        finishedAt: new Date().toISOString(),
-        exitCode: null,
-        error: 'skill kept being used; update deferred after max wait',
-        changed: false,
-      });
+      writeState({ status: 'deferred', finishedAt: new Date().toISOString(),
+        error: 'Skill kept being used; update deferred after max wait', changed: false });
       return;
     }
-
-    writeState({
-      status: 'updating',
-      startedAt: new Date().toISOString(),
-      exitCode: null,
-      changed: false,
-    });
-    runUpdate();
+    writeState({ status: 'updating', startedAt: new Date().toISOString(), changed: false });
+    try { runUpdate(); } catch (error) { markFailure(error); }
   } finally {
     releaseLock(fd);
   }
 }
 
-if (IS_MAIN) main().catch((err) => {
-  try {
-    writeState({
-      status: 'failed',
-      finishedAt: new Date().toISOString(),
-      exitCode: null,
-      error: String(err?.message || err),
-      changed: false,
-    });
-  } catch {}
-});
+if (IS_MAIN) {
+  main().catch(markFailure).finally(() => {
+    if (process.argv[3] === '--cleanup-runner' &&
+        normalized(dirname(SCRIPT_PATH)) === normalized(CACHE_DIR) &&
+        basename(SCRIPT_PATH).startsWith(`update-check-${SKILL_NAME}-`)) {
+      try { unlinkSync(SCRIPT_PATH); } catch {}
+    }
+  });
+}
