@@ -133,6 +133,16 @@ function writeState(patch) {
   writeFileSync(STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+function writeUsageState() {
+  const state = {
+    ...(readState() || {}),
+    lastUsedAt: new Date().toISOString(),
+    lastUsedPid: process.pid,
+  };
+  mkdirSync(dirname(STATE_FILE), { recursive: true });
+  writeFileSync(STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
+}
+
 export function diagnoseUpdate() {
   const lock = readLockInfo();
   const state = readState();
@@ -149,7 +159,7 @@ export function diagnoseUpdate() {
 export function triggerUpdateCheck() {
   try {
     if (successfulToday() || retryPending()) return;
-    writeState({ lastUsedAt: new Date().toISOString(), lastUsedPid: process.pid });
+    writeUsageState();
     mkdirSync(CACHE_DIR, { recursive: true });
     const runner = join(CACHE_DIR, `update-check-${SKILL_NAME}-${process.pid}.mjs`);
     copyFileSync(SCRIPT_PATH, runner);
