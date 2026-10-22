@@ -20,7 +20,10 @@ const SKILL_NAME = basename(SKILL_DIR);
 const STATE_FILE = join(SKILL_DIR, 'scripts', 'update-state.json');
 const CACHE_DIR = join(homedir(), '.cache', 'wind-aifinmarket');
 const LOCK_FILE = join(CACHE_DIR, 'locks', `${createHash('sha256').update(normalized(SKILL_DIR)).digest('hex').slice(0, 24)}.lock`);
-const DEFAULT_SOURCE = 'https://github.com/Wind-Alice/AliceMarket.git';
+const DEFAULT_SOURCES = [
+  'https://github.com/Wind-Alice/AliceMarket.git',
+  'https://gitee.com/WindAlice/AliceMarket.git',
+];
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const QUIET_MS = 10 * 1000;
 const MAX_WAIT_MS = 10 * 60 * 1000;
@@ -58,11 +61,14 @@ function lockCandidates() {
     process.env.XDG_STATE_HOME && join(process.env.XDG_STATE_HOME, 'skills', '.skill-lock.json'),
     join(homedir(), '.agents', '.skill-lock.json'),
   ];
-  const project = [projectRoot(), process.cwd(), process.env.INIT_CWD]
-    .filter(Boolean).map((root) => join(root, 'skills-lock.json'));
-  const agentsRoot = `${normalized(join(homedir(), '.agents', 'skills'))}/`;
-  const standardGlobal = updateScope() === 'global' && normalized(SKILL_DIR).startsWith(agentsRoot);
-  return uniquePaths(standardGlobal ? [...global, ...project] : [...project, ...global]);
+  const project = [join(projectRoot(), 'skills-lock.json')];
+  if (updateScope() !== 'global') return uniquePaths([...project, ...global]);
+  // WorkBuddy used a home-level skills-lock.json in 2.0.4. Do not inspect the
+  // caller's cwd or INIT_CWD: a global installation must not adopt that project.
+  const workbuddyRoot = normalized(join(homedir(), '.workbuddy', 'skills'));
+  const workbuddyLock = normalized(SKILL_DIR).startsWith(`${workbuddyRoot}/`)
+    ? [join(homedir(), 'skills-lock.json')] : [];
+  return uniquePaths([...global, ...workbuddyLock]);
 }
 
 function readLockInfo() {
@@ -80,7 +86,7 @@ function readLockInfo() {
 }
 
 function sourceUrl(entry) {
-  if (!entry) return DEFAULT_SOURCE;
+  if (!entry) return DEFAULT_SOURCES[0];
   if (entry.sourceUrl) return entry.sourceUrl;
   const source = String(entry.source || '');
   if (entry.sourceType === 'github' && /^[^/\s]+\/[^/\s]+$/.test(source)) {
@@ -90,7 +96,11 @@ function sourceUrl(entry) {
       /^[^/\s]+\/[^/\s]+$/.test(source)) {
     return `https://gitee.com/${source}.git`;
   }
-  return source || DEFAULT_SOURCE;
+  return source || DEFAULT_SOURCES[0];
+}
+
+function updateSources(entry) {
+  return entry ? [sourceUrl(entry)] : DEFAULT_SOURCES;
 }
 
 function readState() {
@@ -149,7 +159,7 @@ export function diagnoseUpdate() {
   const source = sourceUrl(lock.entry);
   return {
     update_scope: updateScope(), update_channel: 'personal', auto_update: 'enabled',
-    update_source: source, fallback_sources: [source], update_state_file: STATE_FILE,
+    update_source: source, fallback_sources: updateSources(lock.entry), update_state_file: STATE_FILE,
     update_state: state, next_update_needed: !successfulToday(state) && !retryPending(state),
     lock_file: lock.file, lock_found: Boolean(lock.entry), skill_directory: SKILL_DIR,
     project_directory: updateScope() === 'global' ? null : projectRoot(),
@@ -166,19 +176,42 @@ export function triggerUpdateCheck() {
     const child = spawn(process.execPath, [runner, SKILL_DIR, '--cleanup-runner'], {
       detached: true, stdio: 'ignore', windowsHide: true,
     });
-    child.on('error', () => { try { unlinkSync(runner); } catch {} });
+    child.on('error', (error) => {
+      try { unlinkSync(runner); } catch {}
+      try { markFailure(new Error(`Cannot start background updater: ${error.message}`)); } catch {}
+    });
     child.unref();
-  } catch {
-    // Updating must never block a market-data call.
+  } catch (error) {
+    try { markFailure(error); } catch {}
+    // Updating must never block a market-data call; diagnose exposes the error.
   }
 }
 
 function acquireLock() {
   mkdirSync(dirname(LOCK_FILE), { recursive: true });
   try {
-    if (Date.now() - statSync(LOCK_FILE).mtimeMs > LOCK_STALE_MS) unlinkSync(LOCK_FILE);
+    const age = Date.now() - statSync(LOCK_FILE).mtimeMs;
+    let owner = null;
+    try { owner = JSON.parse(readFileSync(LOCK_FILE, 'utf8'))?.pid; } catch {}
+    let ownerAlive = false;
+    if (Number.isSafeInteger(owner) && owner > 0) {
+      try { process.kill(owner, 0); ownerAlive = true; }
+      catch (error) { ownerAlive = error?.code === 'EPERM'; }
+    }
+    if (!ownerAlive && (owner || age > LOCK_STALE_MS)) unlinkSync(LOCK_FILE);
   } catch {}
-  try { return openSync(LOCK_FILE, 'wx'); } catch { return null; }
+  let fd = null;
+  try {
+    fd = openSync(LOCK_FILE, 'wx');
+    writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    return fd;
+  } catch {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+      try { unlinkSync(LOCK_FILE); } catch {}
+    }
+    return null;
+  }
 }
 
 function releaseLock(fd) {
@@ -274,14 +307,49 @@ function installSourceInStaging(source, fetchDir) {
   return candidate;
 }
 
+function syncDirectory(source, target) {
+  mkdirSync(target, { recursive: true });
+  const names = new Set();
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    names.add(entry.name);
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isDirectory()) {
+      if (existsSync(to) && !statSync(to).isDirectory()) rmSync(to, { force: true });
+      syncDirectory(from, to);
+    } else if (entry.isFile()) {
+      const temporary = `${to}.wind-update-${process.pid}.tmp`;
+      copyFileSync(from, temporary);
+      renameSync(temporary, to);
+    } else {
+      throw new Error(`Unsupported entry in Skill package: ${from}`);
+    }
+  }
+  for (const entry of readdirSync(target, { withFileTypes: true })) {
+    if (!names.has(entry.name)) rmSync(join(target, entry.name), { recursive: true, force: true });
+  }
+}
+
+function recoverInterruptedUpdate() {
+  const parent = dirname(SKILL_DIR);
+  if (!existsSync(parent)) return;
+  for (const name of readdirSync(parent)) {
+    if (!name.startsWith(`.${SKILL_NAME}-update-`)) continue;
+    const work = join(parent, name);
+    const backup = join(work, 'old');
+    if (!existsSync(join(work, 'restore-on-interruption')) || !existsSync(backup)) continue;
+    syncDirectory(backup, SKILL_DIR);
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 function replaceTarget(candidate) {
   const target = realpathSync(SKILL_DIR);
   const parent = dirname(target);
   const work = mkdtempSync(join(parent, `.${SKILL_NAME}-update-`));
   const staged = join(work, 'new');
   const backup = join(work, 'old');
-  let oldMoved = false;
-  let newMoved = false;
+  let safeToClean = false;
   try {
     cpSync(candidate, staged, { recursive: true });
     for (const rel of ['config.json', 'scripts/update-state.json']) {
@@ -291,23 +359,26 @@ function replaceTarget(candidate) {
         copyFileSync(oldFile, join(staged, rel));
       }
     }
-    renameSync(target, backup);
-    oldMoved = true;
-    renameSync(staged, target);
-    newMoved = true;
+    cpSync(target, backup, { recursive: true });
+    writeFileSync(join(work, 'restore-on-interruption'), target);
+    syncDirectory(staged, target);
     if (versionOf(target) !== versionOf(candidate) || packageHash(target) !== packageHash(candidate)) {
       throw new Error('Installed directory failed post-update verification');
     }
+    safeToClean = true;
   } catch (error) {
-    if (oldMoved) {
-      if (newMoved) rmSync(target, { recursive: true, force: true });
-      renameSync(backup, target);
-      oldMoved = false;
+    if (existsSync(join(work, 'restore-on-interruption'))) {
+      try {
+        syncDirectory(backup, target);
+        safeToClean = true;
+      } catch (restoreError) {
+        throw new Error(`Update failed: ${error.message}; restore failed: ${restoreError.message}`);
+      }
     }
     throw error;
   } finally {
     // work is a newly created sibling of the exact, resolved target directory.
-    if (normalized(work).startsWith(`${normalized(parent)}/`)) {
+    if (safeToClean && normalized(work).startsWith(`${normalized(parent)}/`)) {
       rmSync(work, { recursive: true, force: true });
     }
   }
@@ -333,32 +404,49 @@ function markFailure(error) {
   const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (count - 1));
   writeState({ status: 'failed', finishedAt: new Date().toISOString(),
     failureCount: count, nextRetryAt: new Date(Date.now() + delay).toISOString(),
-    error: String(error?.message || error).slice(0, 1000), changed: false });
+    error: String(error?.message || error).slice(0, 4000), changed: false });
 }
 
 function runUpdate() {
+  recoverInterruptedUpdate();
   const lock = readLockInfo();
-  const source = sourceUrl(lock.entry);
   const previous = versionOf(SKILL_DIR);
   const beforeHash = packageHash(SKILL_DIR);
   const fetchDir = mkdtempSync(join(tmpdir(), 'wind-skill-fetch-'));
   try {
-    const cloneDir = join(fetchDir, 'repo');
-    let head = null;
-    let candidate;
-    let method = 'verified-git-clone';
-    try {
-      head = cloneSource(source, cloneDir);
-      candidate = candidatePath(cloneDir, lock.entry);
-    } catch {
-      candidate = installSourceInStaging(source, fetchDir);
-      method = 'verified-skills-add';
+    const failures = [];
+    let selected = null;
+    for (const [index, source] of updateSources(lock.entry).entries()) {
+      const attemptDir = join(fetchDir, `source-${index}`);
+      mkdirSync(attemptDir, { recursive: true });
+      const cloneDir = join(attemptDir, 'repo');
+      let head = null;
+      let candidate;
+      let method = 'verified-git-clone';
+      try {
+        try {
+          head = cloneSource(source, cloneDir);
+          candidate = candidatePath(cloneDir, lock.entry);
+        } catch (cloneError) {
+          try {
+            candidate = installSourceInStaging(source, attemptDir);
+            method = 'verified-skills-add';
+          } catch (addError) {
+            throw new Error(`git clone: ${cloneError.message}; skills add: ${addError.message}`);
+          }
+        }
+        const next = versionOf(candidate);
+        if (compareVersions(next, previous) < 0) {
+          throw new Error(`Downgrade blocked: installed ${previous}, source offers ${next}`);
+        }
+        selected = { source, head, candidate, method, next, sourceHash: packageHash(candidate) };
+        break;
+      } catch (error) {
+        failures.push(`${source}: ${error.message}`);
+      }
     }
-    const next = versionOf(candidate);
-    if (compareVersions(next, previous) < 0) {
-      throw new Error(`Downgrade blocked: installed ${previous}, source offers ${next}`);
-    }
-    const sourceHash = packageHash(candidate);
+    if (!selected) throw new Error(`All update sources failed: ${failures.join(' | ')}`);
+    const { source, head, candidate, method, next, sourceHash } = selected;
     const changed = sourceHash !== beforeHash;
     if (changed) replaceTarget(candidate);
     const installed = versionOf(SKILL_DIR);
@@ -370,7 +458,8 @@ function runUpdate() {
       failureCount: 0, nextRetryAt: null, error: null, changed,
       previousVersion: previous, installedVersion: installed,
       remoteHead: head, lastAppliedRemoteHead: head,
-      beforeHash, afterHash, method });
+      beforeHash, afterHash, method, source,
+      attemptedSources: updateSources(lock.entry), sourceFailures: failures });
   } finally {
     rmSync(fetchDir, { recursive: true, force: true });
   }

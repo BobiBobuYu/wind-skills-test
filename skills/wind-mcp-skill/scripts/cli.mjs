@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  CliError, ServerResponseError, isServerToolError, SERVERS, CALL_EXAMPLES, SKILL_DIR, SKILL_VERSION, buildToolArguments, mcpInitializeAndCall, createMcpSession,
+  CliError, ServerResponseError, isServerToolError, SERVERS, CALL_EXAMPLES, SKILL_DIR, SKILL_VERSION, mcpInitializeAndCall, createMcpSession,
   normalizeCallSuccess, openDeveloperPortal, resolveServerType, serverListEntries, serverTypeList,
   stripBom, writeApiKey, getUserAgent,
 } from './mcp.mjs';
@@ -407,7 +407,7 @@ async function cmdCall([serverType, toolName, paramsInput, ...flags]) {
   const session = await createMcpSession(server_type, { userAgent: userAgent.agent });
   const result = await session.request('tools/call', {
     name: toolName,
-    arguments: buildToolArguments(server_type, toolName, params),
+    arguments: params,
     _meta: { clientVersion: SKILL_VERSION },
   });
   return { server_type, tool: toolName, result, userAgent };
@@ -471,7 +471,6 @@ function usageText() {
     '  cli.mjs setup-key <KEY> [--scope <global|skill>]   # 写入 API Key；默认 scope=global\n' +
     '  cli.mjs diagnose                                   # 查看运行环境、来源标识与自动更新状态（只读）\n\n' +
     '  调用来源在启动时自动识别；--user-agent 或 WIND_USER_AGENT 可覆盖，无法识别时记为 Unknown-Agent\n\n' +
-    (SERVERS.general_data ? '通用金融服务名为 general_data；finance_data 作为兼容名同样可用于 call / list-tools / list-servers。\n\n' : '') +
     '可用 server_type:\n' +
     Object.entries(SERVERS).map(([name, server]) => `  ${name.padEnd(20)}${server.label}`).join('\n') + '\n\n' +
     '典型:\n' +

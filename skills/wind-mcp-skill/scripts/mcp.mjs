@@ -2,9 +2,9 @@
 // mcp.mjs —— Wind MCP 客户端传输层（个人版 3.0.0）
 // ----------------------------------------------------------------------------
 // 职责：向万得 MCP 网关发起 JSON-RPC 调用，并对外提供：
-//   - 服务表（SERVERS / ALIASES / serverTypeList / resolveServerType / serverListEntries）
+//   - 服务表（SERVERS / serverTypeList / resolveServerType / serverListEntries）
 //   - 凭证管理（getApiKey / writeApiKey / openDeveloperPortal）
-//   - 发送前参数整形（buildToolArguments）
+//   - JSON-RPC 业务参数原样传输，校验和兼容由 MCP Server 处理
 //   - 会话与调用（createMcpSession / mcpInitializeAndCall / normalizeCallSuccess）
 // 约定：
 //   - 本文件不写 stdout、不退出进程；服务端错误保留原始响应，由 cli.mjs 输出并设退出码。
@@ -98,21 +98,17 @@ export const SERVERS = Object.freeze({
   },
 });
 
-// 兼容名 -> 正式名。暂无历史别名，保留空表便于后续扩展。
-const ALIASES = Object.freeze({});
-
 // 返回全部可用 server_type 的可读列表（用于报错与 usage 提示）。
 export function serverTypeList() {
   return Object.keys(SERVERS).join(' / ');
 }
 
-// 解析 server_type：先查别名，再查服务表；未知名称直接抛 ROUTE_ERROR。
+// 解析 server_type：按服务表查找；未知名称直接抛 ROUTE_ERROR。
 export function resolveServerType(name) {
-  const resolved = ALIASES[name] || name;
-  if (!SERVERS[resolved]) {
+  if (!Object.hasOwn(SERVERS, name)) {
     throw new CliError('ROUTE_ERROR', `未知 server_type: ${name}. 可用: ${serverTypeList()}`);
   }
-  return resolved;
+  return name;
 }
 
 // 导出服务表条目（供 list-servers 命令离线展示端点、请求头与认证变量）。
@@ -273,80 +269,6 @@ export async function openDeveloperPortal() {
     flow_note: '登录后进入个人版用户页面获取 API Key。',
     fallback_message: `如果浏览器没有自动弹出，请手动访问：${PORTAL_URL}`,
   };
-}
-
-// --------------------------- 发送前参数整形 ---------------------------
-// 只做确定无歧义的转换：代码大小写与港股前导零、逗号分隔串的空白、整型字段、K 线周期助记名。
-// 不为中文名称或无后缀代码猜交易所；工具专属规则按 server_type + tool_name 限定，MCP Server 负责最终校验。
-
-const KLINE_TOOLS = new Set(['get_stock_kline', 'get_fund_kline', 'get_index_kline']);
-const KLINE_PERIODS = new Map([
-  ['1min', '1'], ['5min', '3'], ['10min', '4'], ['15min', '5'],
-  ['30min', '6'], ['60min', '7'], ['120min', '8'], ['240min', '9'],
-  ['1d', '10'], ['1w', '11'], ['1mo', '12'], ['1y', '13'],
-  ['1q', '14'], ['6mo', '15'],
-]);
-
-const splitList = (text) => text.split(',').map((item) => item.trim()).filter(Boolean);
-
-// 中日韩统一表意文字（U+4E00..U+9FFF）。
-function containsHan(text) {
-  for (const ch of text) {
-    const code = ch.codePointAt(0);
-    if (code >= 0x4e00 && code <= 0x9fff) return true;
-  }
-  return false;
-}
-
-// 已带后缀的标准代码统一大小写并去掉港股前导零；中文名称与其它写法原样交给后端解析。
-function normalizeWindcode(code) {
-  if (typeof code !== 'string') return code;
-  const raw = code.trim();
-  if (containsHan(raw)) return raw;
-  const upper = raw.toUpperCase();
-  if (/^0\d{4}\.HK$/.test(upper)) return upper.slice(1);
-  if (/^\d{4}\.HK$/.test(upper)) return upper;
-  if (/^\d{6}\.(SH|SZ|BJ|OF)$/.test(upper)) return upper;
-  if (/^[A-Z]{1,5}\.(O|N|A|HK|SH|SZ|BJ)$/.test(upper)) return upper;
-  return raw;
-}
-
-// windCodes 一律按数组发出：全部服务的契约都是 array<string>。通用服务早先收逗号分隔字符串，
-// 2026-09-09 起后端也改成数组，旧的 join 会让网关把整串当成一个标的。用户仍可传逗号分隔的
-// 字符串，这里拆成数组。
-function normalizeWindcodes(value) {
-  const codes = Array.isArray(value) ? value.map(normalizeWindcode)
-    : typeof value === 'string' ? splitList(value).map(normalizeWindcode)
-      : null;
-  return codes || value;
-}
-
-// server_type + tool_name + 用户参数 → 实际发往网关的 arguments。
-export function buildToolArguments(server_type, toolName, params) {
-  const out = { ...params };
-
-  if (typeof out.indexes === 'string') out.indexes = splitList(out.indexes).join(',');
-  if (typeof out.windcode === 'string') out.windcode = normalizeWindcode(out.windcode);
-  if (typeof out.windCode === 'string') out.windCode = normalizeWindcode(out.windCode);
-  if (Object.hasOwn(out, 'windCodes')) out.windCodes = normalizeWindcodes(out.windCodes);
-
-  // count 是整型字段：整数字符串收敛成 number，其余原样交给网关校验。
-  if (typeof out.count === 'string' && /^-?\d+$/.test(out.count.trim())) out.count = Number(out.count.trim());
-
-  // 通用历史行情的 type：契约声明为字符串枚举 "0"/"1"，但网关按整数解释——传字符串 "1" 会按分时
-  // 返回而不是 K 线。这里把 "0"/"1" 转成整数，其余原样。
-  if (server_type === 'general_data' && toolName === 'quote_get_historical_data_series'
-    && typeof out.type === 'string' && /^[01]$/.test(out.type.trim())) {
-    out.type = Number(out.type.trim());
-  }
-
-  // K 线周期：缺省 1d；助记名转网关编码，已是编码或未知值原样。
-  if (KLINE_TOOLS.has(toolName)) {
-    const period = typeof out.period === 'string' ? out.period.trim() : out.period ?? '1d';
-    out.period = KLINE_PERIODS.get(period) || period;
-  }
-
-  return out;
 }
 
 // ------------------- 传输：initialize → tools/call | tools/list -------------------

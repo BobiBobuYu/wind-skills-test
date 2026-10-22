@@ -56,7 +56,7 @@ reference 中未找到适用能力时，按需用 list-servers 和 list-tools �
 
 reference 用于选择工具和构造参数，MCP Server 负责最终校验。参数拒绝时按具体错误修正；工具缺失、定义有疑问或 reference 与实际结果不一致时，用 `node scripts/cli.mjs list-tools <server_type>` 获取线上定义。同一任务内复用已取得的定义。
 
-使用实际存在的 server、工具名及参数名，类型、默认值和枚举以当前契约为准。`windcode`、`windCode`、`windCodes` 及字符串/数组按各工具定义填写；CLI 处理已实现的参数兼容。
+使用实际存在的 server、工具名及参数名，类型、默认值和枚举以当前契约为准。`windcode`、`windCode`、`windCodes` 及字符串/数组按各工具定义填写；CLI 原样发送解析后的 JSON 参数，默认值、别名和兼容处理由 MCP Server 负责。仅传工具公开定义的参数；`indexes` 使用非空指标名并以英文逗号连接，不使用连续逗号或尾随逗号。
 
 标的明确且工具支持名称时可直接查询；需要搜索或识别时用相应工具。多个候选不能确定目标时再请用户确认，不固定在取数前增加识别调用。
 
