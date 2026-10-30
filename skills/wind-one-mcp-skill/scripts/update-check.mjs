@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Daily GitHub/Gitee updater for the Search / Call Skill.
+// Daily Git updater for the Search / Call Skill.
 
 import {
   closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync,
@@ -15,17 +15,17 @@ import { withPackageLock } from './package-lock.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const IS_MAIN = Boolean(process.argv[1] && resolve(process.argv[1]) === SCRIPT_PATH);
-const SKILL_DIR = IS_MAIN && process.argv[2] ? resolve(process.argv[2]) : dirname(dirname(SCRIPT_PATH));
+const HAS_TARGET_ARGUMENT = IS_MAIN && process.argv[2] && !process.argv[2].startsWith('--');
+const SKILL_DIR = HAS_TARGET_ARGUMENT ? resolve(process.argv[2]) : dirname(dirname(SCRIPT_PATH));
 const SKILL_NAME = basename(SKILL_DIR);
 const REQUIRED_TRANSPORT = 'search-call-v1';
 const autoUpdateEnabled = () => process.env.WIND_SKILL_AUTO_UPDATE !== '0';
 const STATE_FILE = join(SKILL_DIR, 'scripts', 'update-state.json');
 const CACHE_DIR = join(homedir(), '.cache', 'wind-aifinmarket');
 const LOCK_FILE = join(CACHE_DIR, 'locks', `${createHash('sha256').update(normalized(SKILL_DIR)).digest('hex').slice(0, 24)}.lock`);
-const DEFAULT_SOURCES = [
-  'https://github.com/Wind-Alice/AliceMarket.git',
-  'https://gitee.com/WindAlice/AliceMarket.git',
-];
+const UPDATE_SOURCE = 'https://github.com/Wind-Alice/AliceMarket.git';
+const UPDATE_REF = 'main';
+const UPDATE_SKILL_PATH = 'skills/wind-one-mcp-skill/SKILL.md';
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const RETRY_BASE_MS = 30 * 60 * 1000;
 const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
@@ -46,110 +46,88 @@ function projectRoot() {
   return resolve(SKILL_DIR, '..', '..', '..');
 }
 
-function uniquePaths(paths) {
-  const seen = new Set();
-  return paths.filter(Boolean).map((path) => resolve(path)).filter((path) => {
-    const key = normalized(path);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function lockCandidates() {
-  const global = [
-    process.env.XDG_STATE_HOME && join(process.env.XDG_STATE_HOME, 'skills', '.skill-lock.json'),
-    join(homedir(), '.agents', '.skill-lock.json'),
-  ];
-  const project = [join(projectRoot(), 'skills-lock.json')];
-  if (updateScope() !== 'global') return uniquePaths([...project, ...global]);
-  const workbuddyRoot = normalized(join(homedir(), '.workbuddy', 'skills'));
-  const workbuddyLock = normalized(SKILL_DIR).startsWith(`${workbuddyRoot}/`)
-    ? [join(homedir(), 'skills-lock.json')] : [];
-  return uniquePaths([...global, ...workbuddyLock]);
-}
-
-function readLockInfo() {
-  const candidates = lockCandidates();
-  let firstExisting = null;
-  for (const file of candidates) {
-    try {
-      if (!existsSync(file)) continue;
-      firstExisting ||= file;
-      const entry = JSON.parse(readFileSync(file, 'utf8'))?.skills?.[SKILL_NAME];
-      if (entry) return { file, entry };
-    } catch {}
-  }
-  return { file: firstExisting || candidates[0] || null, entry: null };
-}
-
-function sourceUrl(entry) {
-  if (!entry) return DEFAULT_SOURCES[0];
-  if (entry.sourceUrl) return entry.sourceUrl;
-  const source = String(entry.source || '');
-  if (entry.sourceType === 'github' && /^[^/\s]+\/[^/\s]+$/.test(source)) {
-    return `https://github.com/${source}.git`;
-  }
-  if ((entry.sourceType === 'gitee' || entry.sourceType === 'git') &&
-      /^[^/\s]+\/[^/\s]+$/.test(source)) {
-    return `https://gitee.com/${source}.git`;
-  }
-  return source || DEFAULT_SOURCES[0];
-}
-
-function updateSources(entry) {
-  return entry ? [sourceUrl(entry)] : DEFAULT_SOURCES;
-}
-
 function readState() {
   try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')); } catch { return null; }
 }
 
 function todayKey() { return new Date().toISOString().slice(0, 10); }
 
+function sameUpdateTarget(state) {
+  return state?.source === UPDATE_SOURCE && state.ref === UPDATE_REF && state.skillPath === UPDATE_SKILL_PATH;
+}
+
 function retryPending(state = readState()) {
-  return state?.status === 'failed' && Number.isFinite(Date.parse(state.nextRetryAt)) &&
+  return sameUpdateTarget(state) && state.status === 'failed' && Number.isFinite(Date.parse(state.nextRetryAt)) &&
     Date.now() < Date.parse(state.nextRetryAt);
 }
 
 function successfulToday(state = readState()) {
-  return state?.date === todayKey() && state.status === 'success';
+  return sameUpdateTarget(state) && state.date === todayKey() && state.status === 'success';
+}
+
+function skippedUpdate(force = false) {
+  if (force) return null;
+  const state = readState();
+  const reason = !autoUpdateEnabled() ? 'auto_update_disabled'
+    : successfulToday(state) ? 'already_checked_today'
+    : retryPending(state) ? 'retry_pending' : null;
+  return reason ? { status: 'skipped', reason, update_state: state } : null;
 }
 
 function writeState(patch) {
-  const lock = readLockInfo();
+  const previous = readState() || {};
   const state = {
-    ...(readState() || {}), date: todayKey(), scope: updateScope(),
-    lockFile: lock.file, lockFound: Boolean(lock.entry),
-    source: sourceUrl(lock.entry), updatedAt: new Date().toISOString(), ...patch,
+    ...previous, date: todayKey(), scope: updateScope(),
+    failureCount: sameUpdateTarget(previous) ? previous.failureCount : 0,
+    source: UPDATE_SOURCE, ref: UPDATE_REF, skillPath: UPDATE_SKILL_PATH,
+    updatedAt: new Date().toISOString(), ...patch,
   };
   mkdirSync(dirname(STATE_FILE), { recursive: true });
   writeFileSync(STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export function diagnoseUpdate() {
-  const lock = readLockInfo();
   const state = readState();
-  const source = sourceUrl(lock.entry);
   return {
     update_scope: updateScope(), update_channel: 'wind_tools',
-    update_method: 'github-gitee', required_update_transport: REQUIRED_TRANSPORT,
+    update_method: 'git', required_update_transport: REQUIRED_TRANSPORT,
     auto_update: autoUpdateEnabled() ? 'enabled' : 'disabled',
-    update_source: source, fallback_sources: updateSources(lock.entry), update_state_file: STATE_FILE,
+    update_source: UPDATE_SOURCE, update_ref: UPDATE_REF, update_skill_path: UPDATE_SKILL_PATH,
+    update_state_file: STATE_FILE,
     update_state: state, next_update_needed: autoUpdateEnabled() && !successfulToday(state) && !retryPending(state),
-    lock_file: lock.file, lock_found: Boolean(lock.entry), skill_directory: SKILL_DIR,
+    skill_directory: SKILL_DIR,
     project_directory: updateScope() === 'global' ? null : projectRoot(),
   };
 }
 
+function createRunner() {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const runnerDir = mkdtempSync(join(CACHE_DIR, 'runner-'));
+  const runner = join(runnerDir, 'update-check.mjs');
+  copyFileSync(join(SKILL_DIR, 'scripts', 'package-lock.mjs'), join(runnerDir, 'package-lock.mjs'));
+  copyFileSync(SCRIPT_PATH, runner);
+  return runner;
+}
+
+export function updateSkill({ force = false } = {}) {
+  const runner = createRunner();
+  const result = spawnSync(process.execPath,
+    [runner, SKILL_DIR, ...(force ? ['--force'] : []), '--cleanup-runner'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+  if (result.error) {
+    rmSync(dirname(runner), { recursive: true, force: true });
+    throw result.error;
+  }
+  if (!result.stdout.trim()) throw new Error(result.stderr.trim() || `Update runner exited with status ${result.status}`);
+  return JSON.parse(result.stdout);
+}
+
 export function triggerUpdateCheck() {
   try {
-    if (!autoUpdateEnabled() || successfulToday() || retryPending()) return;
-    mkdirSync(CACHE_DIR, { recursive: true });
-    const runnerDir = mkdtempSync(join(CACHE_DIR, 'runner-'));
-    const runner = join(runnerDir, 'update-check.mjs');
-    copyFileSync(join(SKILL_DIR, 'scripts', 'package-lock.mjs'), join(runnerDir, 'package-lock.mjs'));
-    copyFileSync(SCRIPT_PATH, runner);
+    if (skippedUpdate()) return;
+    const runner = createRunner();
+    const runnerDir = dirname(runner);
     const child = spawn(process.execPath, [runner, SKILL_DIR, '--cleanup-runner'], {
       detached: true, stdio: 'ignore', windowsHide: true,
     });
@@ -261,18 +239,12 @@ function packageHash(dir) {
   return hash.digest('hex');
 }
 
-function candidatePath(cloneDir, entry) {
-  const skillPath = String(entry?.skillPath || `skills/${SKILL_NAME}/SKILL.md`).replace(/\\/g, '/');
-  const subdir = skillPath.endsWith('/SKILL.md') ? skillPath.slice(0, -9) : skillPath;
-  const candidate = resolve(cloneDir, subdir);
-  if (!normalized(candidate).startsWith(`${normalized(cloneDir)}/`)) {
-    throw new Error('Skill path escapes downloaded repository');
-  }
-  return candidate;
+function candidatePath(cloneDir) {
+  return resolve(cloneDir, dirname(UPDATE_SKILL_PATH));
 }
 
-function cloneSource(source, dest) {
-  const result = spawnSync('git', ['clone', '--depth', '1', '--quiet', '--', source, dest], {
+function cloneSource(dest) {
+  const result = spawnSync('git', ['clone', '--branch', UPDATE_REF, '--depth', '1', '--quiet', '--', UPDATE_SOURCE, dest], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10 * 60 * 1000,
     windowsHide: true,
   });
@@ -364,7 +336,7 @@ function replaceTarget(candidate, sourceHash) {
 
 function markFailure(error) {
   const previous = readState();
-  const count = Math.min(5, (Number(previous?.failureCount) || 0) + 1);
+  const count = Math.min(5, (sameUpdateTarget(previous) ? Number(previous.failureCount) || 0 : 0) + 1);
   const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (count - 1));
   writeState({ status: 'failed', finishedAt: new Date().toISOString(),
     failureCount: count, nextRetryAt: new Date(Date.now() + delay).toISOString(),
@@ -373,32 +345,18 @@ function markFailure(error) {
 
 async function runUpdate() {
   await withPackageLock(SKILL_DIR, recoverInterruptedUpdate);
-  const lock = readLockInfo();
   const previous = versionOf(SKILL_DIR);
   const beforeHash = packageHash(SKILL_DIR);
   const fetchDir = mkdtempSync(join(tmpdir(), 'wind-skill-fetch-'));
   try {
-    const failures = [];
-    let selected = null;
-    for (const [index, source] of updateSources(lock.entry).entries()) {
-      const attemptDir = join(fetchDir, `source-${index}`);
-      mkdirSync(attemptDir, { recursive: true });
-      const cloneDir = join(attemptDir, 'repo');
-      try {
-        const head = cloneSource(source, cloneDir);
-        const candidate = candidatePath(cloneDir, lock.entry);
-        const next = validatePackage(candidate);
-        if (compareVersions(next, previous) < 0) {
-          throw new Error(`Downgrade blocked: installed ${previous}, source offers ${next}`);
-        }
-        selected = { source, head, candidate, next, sourceHash: packageHash(candidate) };
-        break;
-      } catch (error) {
-        failures.push(`${source}: ${error.message}`);
-      }
+    const cloneDir = join(fetchDir, 'repo');
+    const head = cloneSource(cloneDir);
+    const candidate = candidatePath(cloneDir);
+    const next = validatePackage(candidate);
+    if (compareVersions(next, previous) < 0) {
+      throw new Error(`Downgrade blocked: installed ${previous}, source offers ${next}`);
     }
-    if (!selected) throw new Error(`All update sources failed: ${failures.join(' | ')}`);
-    const { source, head, candidate, next, sourceHash } = selected;
+    const sourceHash = packageHash(candidate);
     const changed = sourceHash !== beforeHash;
     await withPackageLock(SKILL_DIR, () => {
       const afterHash = changed ? replaceTarget(candidate, sourceHash) : packageHash(SKILL_DIR);
@@ -409,8 +367,7 @@ async function runUpdate() {
         failureCount: 0, nextRetryAt: null, error: null, changed,
         previousVersion: previous, installedVersion: next,
         remoteHead: head, lastAppliedRemoteHead: head,
-        beforeHash, afterHash, method: 'verified-git-clone', source,
-        attemptedSources: updateSources(lock.entry), sourceFailures: failures });
+        beforeHash, afterHash, method: 'verified-git-clone' });
     });
   } finally {
     rmSync(fetchDir, { recursive: true, force: true });
@@ -418,23 +375,41 @@ async function runUpdate() {
 }
 
 async function main() {
-  if (!autoUpdateEnabled()) return;
-  if (successfulToday() || retryPending()) return;
+  const flags = process.argv.slice(HAS_TARGET_ARGUMENT ? 3 : 2);
+  if (flags.some(flag => !['--force', '--cleanup-runner'].includes(flag)) || new Set(flags).size !== flags.length) {
+    const error = new Error('Usage: update-check.mjs [skillDir] [--force]');
+    error.code = 'USAGE_ERROR';
+    throw error;
+  }
+  const force = flags.includes('--force');
+  const skipped = skippedUpdate(force);
+  if (skipped) return skipped;
   const fd = acquireLock();
-  if (fd === null) return;
+  if (fd === null) return { status: 'skipped', reason: 'update_in_progress', update_state: readState() };
   try {
-    if (successfulToday() || retryPending()) return;
+    const skipped = skippedUpdate(force);
+    if (skipped) return skipped;
     writeState({ status: 'updating', startedAt: new Date().toISOString(), changed: false });
     await runUpdate();
+    return readState();
   } finally {
     releaseLock(fd);
   }
 }
 
 if (IS_MAIN) {
-  main().catch(markFailure).finally(() => {
+  const writeResult = result => process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  main().then(writeResult).catch(error => {
+    process.exitCode = 1;
+    if (error.code === 'USAGE_ERROR') {
+      writeResult({ status: 'failed', code: error.code, error: error.message });
+    } else {
+      markFailure(error);
+      writeResult(readState());
+    }
+  }).finally(() => {
     const runnerDir = dirname(SCRIPT_PATH);
-    if (process.argv[3] === '--cleanup-runner' &&
+    if (process.argv.includes('--cleanup-runner') &&
         normalized(dirname(runnerDir)) === normalized(CACHE_DIR) &&
         basename(runnerDir).startsWith('runner-')) {
       try { rmSync(runnerDir, { recursive: true, force: true }); } catch {}

@@ -35,9 +35,9 @@ export class CliError extends Error {
 // ------------------------- 静态信息与服务表 -------------------------
 
 // 当前包版本标识（语义化版本号）。update-check.mjs 以此为准校验 Git 来源包并比较版本。
-export const SKILL_VERSION = '3.0.1';
+export const SKILL_VERSION = '3.0.0';
 export const SKILL_TRANSPORT = 'search-call-v1';
-// Skill 根目录：scripts/ 的上一级（即 wind-mcp-skill 目录）。
+// Skill 根目录：scripts/ 的上一级。
 export const SKILL_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const SKILL_NAME = basename(SKILL_DIR);
 

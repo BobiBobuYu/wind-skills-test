@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// wind-mcp-skill CLI 入口：命令分发、参数读取、信封输出与退出码。Agent 只读 stdout。
+// wind-one-mcp-skill CLI 入口：命令分发、参数读取、信封输出与退出码。Agent 只读 stdout。
 // Wind MCP 客户端逻辑在 mcp.mjs，自动更新在 update-check.mjs。
 // 调用方 agent 识别（detect-agent）已内联在本文件：只读本进程的环境变量和祖先进程，不联网。
 import { readFileSync, realpathSync } from 'node:fs';
@@ -11,7 +11,7 @@ import {
   normalizeCallSuccess, openDeveloperPortal, resolveServerType, serverListEntries, serverTypeList,
   stripBom, writeApiKey, getUserAgent, credentialSource,
 } from './mcp.mjs';
-import { diagnoseUpdate, triggerUpdateCheck } from './update-check.mjs';
+import { diagnoseUpdate, triggerUpdateCheck, updateSkill } from './update-check.mjs';
 let cliIdentity;
 
 // ---------- 调用方 agent 识别（内联自 detect-agent.mjs） ----------
@@ -431,6 +431,13 @@ async function cmdSetupKey([key, ...flags]) {
   return writeApiKey({ key, scope });
 }
 
+function cmdUpdate(args) {
+  if (args.length > 1 || (args.length === 1 && args[0] !== '--force')) {
+    throw new CliError('USAGE_ERROR', '用法：cli.mjs update [--force]');
+  }
+  return updateSkill({ force: args.includes('--force') });
+}
+
 const COMMANDS = {
   search: cmdSearch,
   discover: cmdSearch,
@@ -439,6 +446,7 @@ const COMMANDS = {
   'list-servers': cmdListServers,
   'setup-key': cmdSetupKey,
   'open-portal': () => openDeveloperPortal(),
+  update: cmdUpdate,
   diagnose: () => {
     const identity = cliIdentity;
     return { ...diagnoseUpdate(), skill_version: SKILL_VERSION, skill_transport: SKILL_TRANSPORT, platform: process.platform, node_version: process.version,
@@ -455,7 +463,7 @@ function callUsage() {
 }
 
 function usageText() {
-  return 'wind-mcp-skill Search / Call\n' +
+  return 'wind-one-mcp-skill Search / Call\n' +
     '通过 Wind 统一入口先发现工具，再按 inputSchema 调用\n\n' +
     '用法:\n' +
     '  cli.mjs search <用户原问题|@question_file|-> [--top-k N]\n' +
@@ -465,6 +473,7 @@ function usageText() {
     '  cli.mjs list-servers [wind_tools]       # 离线查看连接信息\n' +
     '  cli.mjs open-portal\n' +
     '  cli.mjs setup-key <KEY> [--scope <global|skill>]\n' +
+    '  cli.mjs update [--force]               # 前台检查更新，--force 立即重新检查\n' +
     '  cli.mjs diagnose                       # 只读查看版本、来源标识和更新状态\n\n' +
     '调用来源自动识别；--user-agent 或 WIND_USER_AGENT 可覆盖。Node.js 18+。\n' +
     '典型:\n  ' + CALL_EXAMPLES.join('\n  ');
@@ -499,10 +508,10 @@ export async function main(argv) {
     }
     output.cli_meta = { ...output.cli_meta, user_agent: data.userAgent.value, user_agent_source: data.userAgent.source };
     writeJson(output);
-    // 沿用个人版：call 获得 MCP 结果且未被 CLI 判为错误后尝试更新；不代表业务取数成功。
-    if (cmd === 'call') triggerUpdateCheck();
+    triggerUpdateCheck();
   } else {
     writeJson(data);
+    if (cmd === 'update' && data.status === 'failed') process.exitCode = 1;
   }
 }
 
