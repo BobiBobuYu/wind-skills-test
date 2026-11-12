@@ -1,160 +1,75 @@
 // ============================================================================
-// mcp.mjs —— Wind MCP 客户端传输层（个人版 3.0.0）
+// mcp.mjs —— Wind 金融数据 Skill 的传输层（个人版 4.0.0：search + call）
 // ----------------------------------------------------------------------------
-// 职责：向万得 MCP 网关发起 JSON-RPC 调用，并对外提供：
-//   - 服务表（SERVERS / serverTypeList / resolveServerType / serverListEntries）
-//   - 凭证管理（getApiKey / writeApiKey / openDeveloperPortal）
-//   - JSON-RPC 业务参数原样传输，校验和兼容由 MCP Server 处理
-//   - 会话与调用（createMcpSession / mcpInitializeAndCall / normalizeCallSuccess）
-// 约定：
-//   - 本文件不写 stdout、不退出进程；服务端错误保留原始响应，由 cli.mjs 输出并设退出码。
-//   - cli.mjs 只依赖本文件；个人版版本号使用 X.Y.Z 格式。
+// 分节：
+//   基本信息 / 错误定义 / 凭证 / 传输 / 结果
+//   - 凭证：读取顺序（全局配置 > Skill 本地 config.json > 环境变量）、setup-key 写入、open-portal
+//   - 传输：每条命令向 vserver_wind_tools 发一次 tools/call。网关无状态，不做 initialize 握手，
+//           身份信息（Authorization、User-Agent、clientVersion）每次请求都带上
+//   - 结果：成功时原样返回 content 里的文本；Wind 返回错误时原样保留 message 和 code（见 interpretResult）
+// 约定：本文件不写 stdout、不退出进程、不写日志；输出与退出码由 cli.mjs 负责。
 // ============================================================================
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
+// ------------------------------ 基本信息 ------------------------------
+
+export const SKILL_VERSION = '4.0.0';
+// Skill 根目录：scripts/ 的上一级。
+export const SKILL_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// WIND_MCP_ENDPOINT 只用于测试或私有部署；默认连 Wind 主站。
+export const ENDPOINT = process.env.WIND_MCP_ENDPOINT || 'https://mcp.wind.com.cn/vserver_wind_tools/mcp/';
+export const SEARCH_TOOL = 'market_search_tools';
+export const CALL_TOOL = 'market_call_tool';
+const PORTAL_URL = 'https://market.windalice.com/#/user/overview';
+const CREDENTIAL_ENV = 'WIND_API_KEY';
+
+
 // ------------------------------ 错误定义 ------------------------------
 
-// 本地配置、路由和输入错误仍使用 CliError；服务端响应使用 ServerResponseError。
+// code 是错误类别（取值见 cli.mjs 开头）；message 写明原因和建议；extra 原样并入输出。
 export class CliError extends Error {
-  constructor(code, detail = null, { exitCode = 1, metadata = {} } = {}) {
-    super(typeof detail === 'string' ? detail : '');
+  constructor(code, message, extra = {}) {
+    super(message);
     this.name = 'CliError';
     this.code = code;
-    this.detail = detail;
-    this.exitCode = exitCode;
-    this.metadata = metadata;
+    this.extra = extra;
   }
 }
 
-// ------------------------- 静态信息与服务表 -------------------------
-
-// 当前个人版包版本标识。
-export const SKILL_VERSION = '3.0.0';
-// Skill 根目录：scripts/ 的上一级（即 wind-mcp-skill 目录）。
-export const SKILL_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const SKILL_NAME = basename(SKILL_DIR);
-
-// 调用来源标识只是传输层元数据，绝不作为金融工具的查询参数。
-// 优先级：显式 --user-agent > WIND_USER_AGENT 环境变量；两者都没有且 required 时抛错。
-export function getUserAgent(userAgent, { env = process.env, required = true } = {}) {
-  const explicit = userAgent !== undefined;
-  const configured = explicit || Object.hasOwn(env, 'WIND_USER_AGENT');
-  if (!configured) {
-    if (!required) return null;
-    throw new CliError('USER_AGENT_REQUIRED', '联网调用需要实际Agent标识；传 --user-agent <Agent名称> 或配置 WIND_USER_AGENT。');
-  }
-  const agent = explicit ? userAgent : env.WIND_USER_AGENT;
-  if (typeof agent !== 'string' || agent.length > 256 || !/^[\x20-\x7e]+$/.test(agent) || !agent.trim()) {
-    throw new CliError('USER_AGENT_INVALID', 'Agent标识须为1–256个可打印ASCII字符，不包含换行或控制字符；使用实际宿主标识。');
-  }
-  return { agent: agent.trim(), value: agent.trim(), source: explicit ? 'explicit' : 'environment' };
-}
-
-// 所有服务共用同一个 API Key 与同一套 MCP 传输头；服务表只记录真实差异：地址与说明。
-const CREDENTIAL_ENV = 'WIND_API_KEY';
-const MCP_HEADERS = Object.freeze({
-  Accept: 'application/json, text/event-stream',
-  'Content-Type': 'application/json',
-});
-
-// 服务表：server_type -> { endpoint, label, 以及可选的传输特性 }。
-// 本表同时被 cli.mjs 的 usage/list-servers 与 mcpRequest 的路由使用，是唯一权威来源。
-export const SERVERS = Object.freeze({
-  global_securities: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_global_securities/mcp/',
-    label: 'Wind 全球行情与证券（快照/历史走势/股票财务/基础资料/身份检索）',
-  },
-  stock_data: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_stock_data/mcp/',
-    label: 'Wind 股票（选股筛选 + 档案/财务/股本/事件/技术/风险 + 行情/K线/分钟）',
-  },
-  fund_data: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_fund_data/mcp/',
-    label: 'Wind 基金（基金筛选 + 档案/财务/持仓/业绩/持有人/公司 + 行情/K线/分钟）',
-  },
-  index_data: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_index_data/mcp/',
-    label: 'Wind 指数/板块（档案/基本面/技术 + 行情/K线/分钟）',
-  },
-  bond_data: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_bond_data/mcp/',
-    label: 'Wind 债券（基本档案/发债主体/行情估值/主体财务）',
-  },
-  financial_docs: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_financial_docs/mcp/',
-    label: 'Wind 金融文档 RAG（公告 / 新闻）',
-  },
-  economic_data: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_economic_data/mcp/',
-    label: 'Wind EDB 宏观/行业经济指标',
-  },
-  analytics_data: {
-    endpoint: 'https://mcp.wind.com.cn/vserver_analytics_data/mcp/',
-    label: 'Wind 通用分析数据（NL → Wind 数据）',
-  },
-});
-
-// 返回全部可用 server_type 的可读列表（用于报错与 usage 提示）。
-export function serverTypeList() {
-  return Object.keys(SERVERS).join(' / ');
-}
-
-// 解析 server_type：按服务表查找；未知名称直接抛 ROUTE_ERROR。
-export function resolveServerType(name) {
-  if (!Object.hasOwn(SERVERS, name)) {
-    throw new CliError('ROUTE_ERROR', `未知 server_type: ${name}. 可用: ${serverTypeList()}`);
-  }
-  return name;
-}
-
-// 导出服务表条目（供 list-servers 命令离线展示端点、请求头与认证变量）。
-export function serverListEntries(filter) {
-  return Object.entries(SERVERS)
-    .filter(([name]) => !filter || name === filter)
-    .map(([name, server]) => ({
-      server_type: name,
-      endpoint: server.endpoint,
-      endpoint_source: 'skill_contract',
-      auth_env: [CREDENTIAL_ENV],
-      headers: { ...MCP_HEADERS },
-    }));
-}
-
-// ------------------ 凭证：读取顺序、setup-key 写入、open-portal ------------------
-// Key 不得出现在源码、日志或错误信息里；对外只暴露 maskKey 的结果。
-
-const PORTAL_URL = 'https://market.windalice.com/#/user/overview';
+// ------------------------------ 凭证 ------------------------------
 
 const globalConfigFile = () => join(homedir(), '.wind-aifinmarket', 'config');
 const localConfigFile = () => join(SKILL_DIR, 'config.json');
 
-function maskKey(key) {
+export function maskKey(key) {
   if (!key || key.length < 8) return '***';
-  return key.slice(0, 4) + '***' + key.slice(-4);
+  return `${key.slice(0, 4)}***${key.slice(-4)}`;
 }
 
-// 去 BOM：按码位判断，避免源码里出现不可见字符。
 export function stripBom(text) {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
-// dotenv 子集解析：支持注释行、export 前缀、引号包裹，写回时按原样保留其它行。
+// dotenv 子集：注释行、export 前缀、引号包裹（引号后可跟 # 注释）、行尾 # 注释。
 function parseDotenv(content) {
   const env = {};
-  for (const rawLine of content.split('\n')) {
-    let line = stripBom(rawLine).trim();
+  for (const rawLine of stripBom(content).split(/\r?\n/)) {
+    let line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
     if (line.startsWith('export ')) line = line.slice(7).trim();
     const eq = line.indexOf('=');
     if (eq <= 0) continue;
     const key = line.slice(0, eq).trim();
     let value = line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
+    const quote = value[0];
+    if (quote === '"' || quote === "'") {
+      const close = value.indexOf(quote, 1);
+      value = close > 0 ? value.slice(1, close) : value.slice(1);
     } else {
       const comment = value.indexOf(' #');
       if (comment >= 0) value = value.slice(0, comment).trim();
@@ -164,222 +79,211 @@ function parseDotenv(content) {
   return env;
 }
 
-// 用户全局配置（~/.wind-aifinmarket/config，dotenv 格式）；文件损坏时视为空。
 function readGlobalConfig() {
-  const file = globalConfigFile();
-  if (!existsSync(file)) return {};
   try {
-    return parseDotenv(readFileSync(file, 'utf8'));
+    const file = globalConfigFile();
+    return existsSync(file) ? parseDotenv(readFileSync(file, 'utf8')) : {};
   } catch {
     return {};
   }
 }
 
-// Skill 本地配置（config.json，JSON 格式）；文件损坏时视为空。
 function readLocalConfig() {
-  const file = localConfigFile();
-  if (!existsSync(file)) return {};
   try {
-    const cfg = JSON.parse(readFileSync(file, 'utf8'));
+    const file = localConfigFile();
+    if (!existsSync(file)) return {};
+    const cfg = JSON.parse(stripBom(readFileSync(file, 'utf8')));
     return cfg && typeof cfg === 'object' ? cfg : {};
   } catch {
     return {};
   }
 }
 
-// API Key 查找顺序：用户全局配置 > Skill 本地 config.json 的 wind_api_key > 环境变量。
-// 都未配置时抛出可操作的 AUTH_ERROR，提示 open-portal / setup-key 流程。
-function getApiKey() {
+// 与 2.0.4 / 3.0.0 相同的读取顺序：用户全局配置 > Skill 本地 config.json > 环境变量。
+function resolveCredential() {
   const sources = [
-    () => readGlobalConfig()[CREDENTIAL_ENV],
-    () => readLocalConfig().wind_api_key,
-    () => process.env[CREDENTIAL_ENV],
+    ['global', globalConfigFile(), () => readGlobalConfig()[CREDENTIAL_ENV]],
+    ['skill', localConfigFile(), () => readLocalConfig().wind_api_key],
+    ['env', CREDENTIAL_ENV, () => process.env[CREDENTIAL_ENV]],
   ];
-  for (const read of sources) {
+  for (const [source, location, read] of sources) {
     const value = read();
-    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'string' && value.trim()) return { source, location, key: value.trim() };
   }
-  throw new CliError('AUTH_ERROR',
-    `${CREDENTIAL_ENV} 未配置（已检查：用户全局配置 > Skill 本地配置 > 环境变量）。` +
-    '运行 node scripts/cli.mjs open-portal 获取 API Key，再运行 node scripts/cli.mjs setup-key <KEY> 写入后重试。');
+  return null;
 }
 
-// 写入用户全局配置：替换旧的 WIND_API_KEY 行，保留文件里其它内容。
+export function credentialSummary() {
+  const found = resolveCredential();
+  return found
+    ? { source: found.source, location: found.location, key_masked: maskKey(found.key) }
+    : { source: null, checked: [globalConfigFile(), localConfigFile(), `环境变量 ${CREDENTIAL_ENV}`] };
+}
+
+// Key 只会是可打印的英文字符。从网页复制时混进全角或不可见字符，fetch 会抛 ByteString 错误，
+// 被当成网络问题；这里提前拦下，报成 Key 的问题。
+const KEY_PATTERN = /^[\x21-\x7e]+$/;
+const SOURCE_LABELS = Object.freeze({ global: '用户全局配置', skill: 'Skill 本地 config.json', env: `环境变量 ${CREDENTIAL_ENV}` });
+
+function getApiKey() {
+  const found = resolveCredential();
+  if (!found) throw new CliError('AUTH_ERROR', `未配置 API Key（已检查：用户全局配置、Skill 本地配置、环境变量 ${CREDENTIAL_ENV}）。`);
+  if (!KEY_PATTERN.test(found.key)) {
+    throw new CliError('AUTH_ERROR', `${SOURCE_LABELS[found.source]}里的 API Key 含有空格、全角或不可见字符，可能是复制时带进来的（${found.location}）。`);
+  }
+  return found;
+}
+
+// writeFileSync 的 mode 只在新建文件时生效；文件已存在时要显式收紧成仅本人可读写。
+function restrictPermissions(file) {
+  if (process.platform === 'win32') return;
+  try { chmodSync(file, 0o600); } catch {}
+}
+
 function writeGlobalKey(file, key) {
   mkdirSync(dirname(file), { recursive: true });
   const keyLine = new RegExp(`^\\s*(export\\s+)?${CREDENTIAL_ENV}\\s*=`);
   const kept = existsSync(file)
-    ? readFileSync(file, 'utf8').split('\n').filter((line) => line.length > 0 && !keyLine.test(line))
+    ? readFileSync(file, 'utf8').split(/\r?\n/).filter((line) => line.length > 0 && !keyLine.test(line))
     : [];
   writeFileSync(file, [...kept, `${CREDENTIAL_ENV}=${key}`].join('\n') + '\n', { mode: 0o600 });
+  restrictPermissions(file);
 }
 
-// 写入 Skill 本地配置：合并 wind_api_key 字段；原文件必须是合法 JSON，否则不覆盖。
 function writeLocalKey(file, key) {
   let cfg = {};
   if (existsSync(file)) {
     try {
-      cfg = JSON.parse(readFileSync(file, 'utf8'));
+      cfg = JSON.parse(stripBom(readFileSync(file, 'utf8')));
     } catch (err) {
-      throw new CliError('SETUP_ERROR', `本地配置不是合法 JSON，已保留原文件未覆盖：${file} (${err.message})`);
+      throw new CliError('SETUP_ERROR', `本地配置不是合法 JSON，已保留原文件未覆盖：${file}（${err.message}）`);
     }
   }
   writeFileSync(file, JSON.stringify({ ...cfg, wind_api_key: key }, null, 2) + '\n', { mode: 0o600 });
+  restrictPermissions(file);
 }
 
-// setup-key：scope=global 写用户全局配置，scope=skill 写 Skill 本地 config.json。
-// 返回脱敏后的写入结果，key 本身不出现在返回值里。
+// setup-key：scope=global 写用户全局配置（所有 Wind Skill 共用），scope=skill 写本 Skill 的 config.json。
 export function writeApiKey({ key, scope }) {
+  const trimmed = String(key || '').trim();
+  if (!KEY_PATTERN.test(trimmed)) throw new CliError('SETUP_ERROR', 'API Key 只能由可打印的英文字符组成，不能为空，也不能有空格、全角或不可见字符；请重新复制。');
   const file = scope === 'global' ? globalConfigFile() : localConfigFile();
   try {
-    if (scope === 'global') writeGlobalKey(file, key);
-    else writeLocalKey(file, key);
+    if (scope === 'global') writeGlobalKey(file, trimmed);
+    else writeLocalKey(file, trimmed);
   } catch (err) {
     if (err instanceof CliError) throw err;
-    throw new CliError('SETUP_ERROR', `配置写入失败 (scope=${scope}, path=${file}): ${err.message}`);
+    throw new CliError('SETUP_ERROR', `API Key 写入失败（scope=${scope}，path=${file}）：${err.message}`);
   }
-  return { scope, path: file, key_masked: maskKey(key), next: '现在可以重试原 Wind 调用' };
+  const result = { ok: true, scope, path: file, key_masked: maskKey(trimmed), next: '重试原来的 search 或 call 命令' };
+  // 写进 Skill 本地配置时，全局配置里的旧 Key 优先级更高，会把这次写的盖住。
+  const effective = resolveCredential();
+  if (effective && effective.source !== scope) {
+    result.effective_source = effective.source;
+    result.warning = `已写入，但当前生效的是${SOURCE_LABELS[effective.source]}里的 Key（${maskKey(effective.key)}），它的优先级更高。` +
+      '要让这次的 Key 生效，运行 setup-key <KEY>（默认写入用户全局配置）。';
+    result.next = '先按 warning 处理，再重试原来的命令';
+  }
+  return result;
 }
 
-// open-portal：按平台用系统默认浏览器打开个人版用户页面；启动失败时抛错并给出手动地址。
 export async function openDeveloperPortal() {
   const platform = process.platform;
   const [bin, args] = platform === 'darwin' ? ['open', [PORTAL_URL]]
     : platform === 'win32' ? ['cmd', ['/c', 'start', '', PORTAL_URL]]
       : ['xdg-open', [PORTAL_URL]];
-
   let spawnError = null;
   try {
     const child = spawn(bin, args, { stdio: 'ignore', detached: true, windowsHide: true });
     child.unref();
-    spawnError = await new Promise((resolve) => {
-      child.once('error', resolve);
-      setTimeout(() => resolve(null), 300);
+    spawnError = await new Promise((done) => {
+      child.once('error', done);
+      child.once('exit', (code) => done(code ? new Error(`${bin} 退出码 ${code}`) : null));
+      setTimeout(() => done(null), 1000);
     });
   } catch (err) {
     spawnError = err;
   }
-  if (spawnError) {
-    throw new CliError('SETUP_ERROR', `本地无法启动浏览器: ${spawnError.message} | 用户应手动打开 ${PORTAL_URL}`);
-  }
   return {
+    ok: true,
+    opened: !spawnError,
     url: PORTAL_URL,
-    platform,
-    spawn_command: `${bin} ${args.join(' ')}`,
-    flow_note: '登录后进入个人版用户页面获取 API Key。',
-    fallback_message: `如果浏览器没有自动弹出，请手动访问：${PORTAL_URL}`,
+    message: spawnError
+      ? `无法自动打开浏览器（${spawnError.message}）。请把地址 ${PORTAL_URL} 发给用户，请用户登录后复制 API Key。`
+      : `已在浏览器打开 ${PORTAL_URL}。请用户登录后复制 API Key，再运行 setup-key <KEY>。`,
   };
 }
 
-// ------------------- 传输：initialize → tools/call | tools/list -------------------
+// ------------------------------ 传输 ------------------------------
 
-const PROTOCOL_VERSION = '2025-03-26';
-const INITIALIZE_TIMEOUT_MS = 30_000;
-const CALL_TIMEOUT_MS = 600_000;
-// 服务端 HTTP/JSON-RPC 错误保留原始响应正文，由 CLI 原样输出。
-export class ServerResponseError extends Error {
-  constructor(body, status = null) {
-    super(body);
-    this.name = 'ServerResponseError';
-    this.body = body;
-    this.status = status;
-  }
-}
+const MCP_HEADERS = Object.freeze({
+  Accept: 'application/json, text/event-stream',
+  'Content-Type': 'application/json',
+});
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+let requestSeq = 0;
 
 function isTimeoutError(error) {
   return error?.name === 'TimeoutError' || error?.name === 'AbortError'
     || error?.cause?.code === 'UND_ERR_HEADERS_TIMEOUT' || error?.cause?.code === 'UND_ERR_BODY_TIMEOUT';
 }
 
-function networkFailure(error) {
-  if (!(error instanceof TypeError) || !['fetch failed', 'terminated'].includes(error.message)) return null;
-  const cause = error.cause;
-  const detail = cause?.code || cause?.errors?.map(item => item.code).filter(Boolean).join(', ') || 'UNKNOWN';
-  return new CliError('NETWORK_ERROR', `网络请求失败（${detail}）：${error.message}`);
-}
-
-// 只负责发送和设置超时；网络异常保持原始异常。
-async function sendRequest(endpoint, body, { timeoutMs, extraHeaders }) {
-  const headers = { Authorization: `Bearer ${getApiKey()}`, ...MCP_HEADERS, ...extraHeaders };
-  // WIND_TRACE=1：把真实传到网关的请求头与请求体打到 stderr（Authorization 打码，其余原样）。
-  if (process.env.WIND_TRACE === '1') {
-    const safeHeaders = { ...headers };
-    if (typeof safeHeaders.Authorization === 'string' && safeHeaders.Authorization.startsWith('Bearer ')) {
-      safeHeaders.Authorization = `Bearer ${maskKey(safeHeaders.Authorization.slice('Bearer '.length))}`;
-    }
-    process.stderr.write(`[wind-mcp trace] POST ${endpoint}\n`);
-    process.stderr.write(`[wind-mcp trace] 请求头: ${JSON.stringify(safeHeaders, null, 2)}\n`);
-    process.stderr.write(`[wind-mcp trace] 请求体: ${body}\n`);
+// fetch 的网络异常统一成 NETWORK_ERROR / TIMEOUT，保留底层错误码便于排查。
+function transportFailure(error, timeoutMs) {
+  if (error instanceof CliError) return error;
+  if (isTimeoutError(error)) {
+    return new CliError('TIMEOUT', `请求 Wind 超过 ${Math.round(timeoutMs / 1000)} 秒未返回。可减少标的或缩短时间段后再试。`);
   }
-  return fetch(endpoint, {
-    method: 'POST', headers, body, signal: AbortSignal.timeout(timeoutMs),
-  });
+  const cause = error?.cause;
+  const detail = cause?.code || cause?.errors?.map((item) => item.code).filter(Boolean).join(', ') || error?.message || 'UNKNOWN';
+  const proxyVar = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY'].find((name) => process.env[name]);
+  const proxyNote = proxyVar ? `检测到设置了 ${proxyVar}，但 Node.js 内置的 fetch 默认不走这个代理（Node 24 起可再设 NODE_USE_ENV_PROXY=1）。` : '';
+  return new CliError('NETWORK_ERROR', `无法连接 Wind 服务（${detail}）。${proxyNote}请检查网络后再试。`);
 }
 
-// 后端正常返回 SSE，部分错误场景返回纯 JSON；纯 JSON 优先整体解析，否则取最后一个 data 行。
-function parsePayload(text, server_type) {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('{')) {
+// SSE：按空行分块，取 id 匹配的 data 消息；纯 JSON：整体解析。
+async function readRpcResponse(resp, id) {
+  const contentType = resp.headers.get('content-type') || '';
+  if (!contentType.includes('text/event-stream')) {
+    const text = await resp.text();
+    if (text.length > MAX_RESPONSE_BYTES) throw new CliError('SERVICE_ERROR', '返回内容超过 32MB，请缩小查询范围。');
     try {
-      return JSON.parse(trimmed);
+      return JSON.parse(text);
     } catch {
-      // 不是纯 JSON，按 SSE 继续解析。
+      throw new CliError('SERVICE_ERROR', `Wind 返回的内容无法解析（HTTP ${resp.status}）：${text.slice(0, 300)}`);
     }
-  }
-  let last = null;
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith('data: ')) last = line.slice(6);
-  }
-  if (last) {
-    try {
-      return JSON.parse(last);
-    } catch (err) {
-      throw new CliError('TOOL_RUNTIME_ERROR', `SSE data 行 JSON 解析失败：${err.message}。原文前 200 字符：${text.slice(0, 200)} (server=${server_type})`);
-    }
-  }
-  throw new CliError('TOOL_RUNTIME_ERROR', `响应格式无法识别（既非 SSE 也非纯 JSON）。原文前 200 字符：${text.slice(0, 200)} (server=${server_type})`);
-}
-
-// 读取并匹配属于本次请求 id 的响应：SSE 流按 \n\n 分块、过滤 data: 行，匹配到同 id 即返回。
-async function readMatchingResponse(resp, id, server_type) {
-  if (!resp.headers.get('content-type')?.includes('text/event-stream')) {
-    const payload = parsePayload(await resp.text(), server_type);
-    if (payload.id !== id) throw new CliError('TOOL_RUNTIME_ERROR', 'JSON-RPC response id mismatch');
-    return payload;
   }
   const reader = resp.body?.getReader();
-  if (!reader) throw new CliError('TOOL_RUNTIME_ERROR', 'SSE response has no readable body');
+  if (!reader) throw new CliError('SERVICE_ERROR', 'Wind 返回了空的事件流。');
   const decoder = new TextDecoder();
   let buffer = '';
+  let scanFrom = 0;
   let bytes = 0;
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (value) {
         bytes += value.byteLength;
-        if (bytes > 32 * 1024 * 1024) throw new CliError('TOOL_RUNTIME_ERROR', 'SSE response exceeds 32 MiB');
-        buffer += decoder.decode(value, { stream: true });
+        if (bytes > MAX_RESPONSE_BYTES) throw new CliError('SERVICE_ERROR', '返回内容超过 32MB，请缩小查询范围。');
+        // JSON 文本里的回车都是转义过的，裸 \r 只会是行尾，去掉后按 \n 分行。
+        buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
       }
-      if (done) buffer += decoder.decode();
-      buffer = buffer.replace(/\r\n/g, '\n');
+      if (done) buffer += `${decoder.decode().replace(/\r/g, '')}\n\n`;
       let separator;
-      while ((separator = buffer.indexOf('\n\n')) >= 0) {
+      while ((separator = buffer.indexOf('\n\n', scanFrom)) >= 0) {
         const block = buffer.slice(0, separator);
         buffer = buffer.slice(separator + 2);
-        const data = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+        scanFrom = 0;
+        const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
         if (!data) continue;
         let message;
-        try { message = JSON.parse(data); }
-        catch (err) { throw new CliError('TOOL_RUNTIME_ERROR', `SSE JSON parse failed: ${err.message}`); }
+        try { message = JSON.parse(data); } catch (err) {
+          throw new CliError('SERVICE_ERROR', `事件流里的 JSON 无法解析：${err.message}`);
+        }
         if (message.id === id) return message;
       }
-      if (done) {
-        if (buffer.includes('data:')) {
-          const message = parsePayload(buffer, server_type);
-          if (message.id === id) return message;
-        }
-        throw new CliError('TOOL_RUNTIME_ERROR', 'SSE ended without the matching JSON-RPC response');
-      }
+      if (done) throw new CliError('SERVICE_ERROR', '事件流结束，但没有收到本次请求的结果。');
+      scanFrom = Math.max(0, buffer.length - 1);
     }
   } finally {
     await reader.cancel().catch(() => {});
@@ -387,116 +291,82 @@ async function readMatchingResponse(resp, id, server_type) {
   }
 }
 
-// 单一 JSON-RPC 请求。只有 tools/call 超时才立即重试一次，其它失败不重试。
-async function mcpRequest(server_type, method, params, { timeoutMs, extraHeaders = {}, notification = false }) {
-  const server = SERVERS[server_type];
-  if (!server) throw new CliError('ROUTE_ERROR', '未知 server_type: ' + server_type + '. 可用: ' + serverTypeList());
-  const id = notification ? undefined : Date.now();
+// 发一条 JSON-RPC 请求。返回 { status, message }；HTTP 非 2xx 时 message 为 null、body 为原文。
+async function rpc(method, params, { timeoutMs, headers = {} }) {
+  const credential = getApiKey();
+  const id = `${process.pid}-${Date.now()}-${++requestSeq}`;
   const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
-  const attempts = method === 'tools/call' ? 2 : 1;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const resp = await sendRequest(server.endpoint, body, { timeoutMs, extraHeaders });
-      if (!resp.ok) {
-        const raw = await resp.text();
-        throw new ServerResponseError(raw || `HTTP ${resp.status}`, resp.status);
-      }
-      if (notification) {
-        await resp.body?.cancel().catch(() => {});
-        return { result: null, sessionId: resp.headers.get('mcp-session-id') };
-      }
-      const payload = server.streaming
-        ? await readMatchingResponse(resp, id, server_type)
-        : parsePayload(await resp.text(), server_type);
-      if (payload.error) throw new ServerResponseError(JSON.stringify(payload));
-      if (payload.result === undefined) {
-        throw new CliError('TOOL_RUNTIME_ERROR', '响应缺少 result 字段。原文前 200 字符：' + JSON.stringify(payload).slice(0, 200) + ' (server=' + server_type + ')');
-      }
-      return { result: payload.result, sessionId: resp.headers.get('mcp-session-id') };
-    } catch (error) {
-      if (method === 'tools/call' && attempt === 0 && isTimeoutError(error)) continue;
-      throw networkFailure(error) || error;
-    }
+  const allHeaders = { Authorization: `Bearer ${credential.key}`, ...MCP_HEADERS, ...headers };
+  let resp;
+  try {
+    resp = await fetch(ENDPOINT, { method: 'POST', headers: allHeaders, body, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    throw transportFailure(error, timeoutMs);
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    return { status: resp.status, message: null, body: text };
+  }
+  try {
+    return { status: resp.status, message: await readRpcResponse(resp, id), body: null };
+  } catch (error) {
+    throw error instanceof CliError ? error : transportFailure(error, timeoutMs);
   }
 }
 
-export function isServerToolError(result) {
-  if (result?.isError === true) return true;
-  const raw = result?.structuredContent?.code;
-  if (raw === undefined || raw === null || raw === 0 || raw === '0') return false;
-  const numeric = Number(raw);
-  return !Number.isFinite(numeric) || numeric < 200 || numeric >= 300;
-}
-
-// 建立会话：initialize → 携带 sessionId/协议版本 → 必要时发送 initialized 通知 → 返回可复用的 request。
-// 会话仅在当前调用内持有；不在进程全局或用户目录缓存会话与工具定义。
-export async function createMcpSession(server_type, { userAgent } = {}) {
-  const identity = getUserAgent(userAgent);
-  const identityHeaders = { 'User-Agent': identity.value };
-  const init = await mcpRequest(server_type, 'initialize', {
-    protocolVersion: PROTOCOL_VERSION,
-    capabilities: {},
-    clientInfo: { name: SKILL_NAME, version: SKILL_VERSION },
-  }, { timeoutMs: INITIALIZE_TIMEOUT_MS, extraHeaders: identityHeaders });
-
-  const sessionHeaders = { ...identityHeaders };
-  if (init.sessionId) sessionHeaders['Mcp-Session-Id'] = init.sessionId;
-  const negotiated = init.result?.protocolVersion;
-  if (negotiated) sessionHeaders['MCP-Protocol-Version'] = negotiated;
-  if (SERVERS[server_type].initializedNotification) {
-    if (negotiated !== PROTOCOL_VERSION || !init.result?.capabilities?.tools) {
-      throw new CliError('TOOL_RUNTIME_ERROR', 'MCP protocol or tools capability was not confirmed');
-    }
-    await mcpRequest(server_type, 'notifications/initialized', {}, {
-      timeoutMs: INITIALIZE_TIMEOUT_MS, extraHeaders: sessionHeaders, notification: true,
-    });
+// HTTP 层的失败（网关之前的代理、鉴权页面等）。网关自身的错误走 HTTP 200 + isError，见 interpretResult。
+function httpError(reply) {
+  // 401/403 常返回整页 HTML，对 agent 没有信息量，不放进输出。
+  const raw = (reply.body || '').trim();
+  const extra = { status: reply.status, ...(raw && !raw.startsWith('<') ? { body: raw.slice(0, 1000) } : {}) };
+  if (reply.status === 401) return new CliError('AUTH_ERROR', 'API Key 无效或已过期（HTTP 401）。', extra);
+  if (reply.status === 403) return new CliError('PERMISSION_DENIED', '当前账号没有权限访问（HTTP 403）。', extra);
+  if (reply.status === 429) return new CliError('SERVICE_ERROR', '请求过于频繁，Wind 服务暂时拒绝了这次请求（HTTP 429）。请稍后再试。', extra);
+  // 502/503/504 多是短暂的（11-11 第五轮实测 3 次，重试或换工具都拿到了数据）。CLI 不自动重试：请求可能已经执行。
+  if ([502, 503, 504].includes(reply.status)) {
+    return new CliError('SERVICE_ERROR', `Wind 服务暂时不可用（HTTP ${reply.status}）。可以过几秒重试一次，或换个工具；仍然失败就停止调用，如实告诉用户。`, extra);
   }
-
-  return {
-    async request(method, params) {
-      const call = await mcpRequest(server_type, method, params, { timeoutMs: CALL_TIMEOUT_MS, extraHeaders: sessionHeaders });
-      if (call.sessionId) sessionHeaders['Mcp-Session-Id'] = call.sessionId;
-      return call.result;
-    },
-  };
+  return new CliError('SERVICE_ERROR', `Wind 服务返回 HTTP ${reply.status}，请稍后再试。`, extra);
 }
 
-// 一步式：initialize + 单次调用，供无需复用会话的场景（如 list-tools）使用。
-export async function mcpInitializeAndCall(server_type, method, params, options = {}) {
-  const session = await createMcpSession(server_type, options);
-  return session.request(method, params);
+// 调用网关上的一个元工具（market_search_tools / market_call_tool），返回 MCP result 原文。
+export async function callGatewayTool(name, args, { userAgent, timeoutMs }) {
+  const params = { name, arguments: args, _meta: { clientVersion: SKILL_VERSION } };
+  const reply = await rpc('tools/call', params, { timeoutMs, headers: { 'User-Agent': userAgent } });
+  if (reply.message === null) throw httpError(reply);
+  if (reply.message.error) {
+    const err = reply.message.error;
+    throw new CliError('SERVICE_ERROR', `Wind 服务返回错误：${err.message || JSON.stringify(err)}`, { rpc_code: err.code ?? null });
+  }
+  if (!reply.message.result || typeof reply.message.result !== 'object') {
+    throw new CliError('SERVICE_ERROR', 'Wind 返回中缺少 result。');
+  }
+  return reply.message.result;
 }
 
-// 保留后端结果原文，只附加 CLI 路由与明确错误的元数据。
-export function normalizeCallSuccess(result, { server_type = null, tool_name = null } = {}) {
-  const output = result && typeof result === 'object' ? structuredClone(result) : result;
-  if (!output || typeof output !== 'object' || Array.isArray(output)) throw new CliError('TOOL_RUNTIME_ERROR', 'MCP result must be an object');
-  if (isServerToolError(output)) return output;
-  const warnings = Array.isArray(output.cli_meta?.warnings) ? [...output.cli_meta.warnings] : [];
-  output.cli_meta = {
-    ...output.cli_meta,
-    schema_version: '1.0',
-    server_type,
-    tool_name,
-    completeness: 'not_asserted',
-    warnings,
-  };
-  return output;
+// ------------------------------ 结果 ------------------------------
+
+function textOf(result) {
+  const parts = Array.isArray(result?.content) ? result.content : [];
+  return parts.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text);
 }
 
-// call 命令 usage 里展示的典型调用示例。
-export const CALL_EXAMPLES = [
-  `cli.mjs call global_securities securities_get_price '{"windCodes":["600519.SH"]}'`,
-  `cli.mjs call stock_data search_stocks '{"question":"筛选沪深市场市值超500亿且连续5日上涨的股票"}'`,
-  `cli.mjs call stock_data search_stocks '{"question":"筛选港股中市值超1000亿港元的科技股"}'`,
-  `cli.mjs call fund_data search_funds '{"question":"筛选股票型基金中近一年收益率超20%的产品"}'`,
-  `cli.mjs call stock_data get_stock_basicinfo '{"question":"600519.SH公司基本档案"}'`,
-  `cli.mjs call stock_data get_stock_price_indicators '{"windcode":"600519.SH","indexes":"中文简称,最新成交价,涨跌幅"}'`,
-  `cli.mjs call fund_data get_fund_kline '{"windcode":"588200.SH","begin_date":"2026-04-01","end_date":"2026-04-30"}'`,
-  `cli.mjs call stock_data get_stock_quote '{"windcode":"AAPL.O","begin":"2026-08-05","end":"2026-08-05","count":-30}'`,
-  `cli.mjs call index_data get_index_kline '{"windcode":"000300.SH","begin_date":"2026-04-01","end_date":"2026-04-30"}'`,
-  `cli.mjs call financial_docs get_financial_news '{"query":"美联储利率政策","top_k":3}'`,
-  `cli.mjs call economic_data search_economic_indicator '{"question":"中国GDP相关指标有哪些"}'`,
-  `cli.mjs call economic_data query_economic_indicator_data '{"question":"中国GDP","observation":10}'`,
-  `cli.mjs call analytics_data get_financial_data '{"question":"查询中国A股市场过去一年的平均成交量"}'`,
-];
+// 认证（401）和权限（403）单独标出：前者要重新配置 Key，后者 Key 没问题、是账号没开通。
+const STATUS_CODES = Object.freeze({ 401: 'AUTH_ERROR', 403: 'PERMISSION_DENIED' });
+
+// 成功：原样返回 content 里的文本，不解析、不改写；多段文本按换行拼接。
+//       没有文本时才退而返回 structuredContent（序列化成 JSON 文本）。
+// 失败：Wind 的报错都是 HTTP 200 + isError，structuredContent.code 沿用 HTTP 语义（400、401、403、422、429、5xx…，见 MCP-CODE.md）。
+//       提示语已写明原因和建议，原样作为 message，code 放进 status。
+export function interpretResult(result) {
+  const texts = textOf(result);
+  if (result?.isError === true) {
+    const sc = result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : {};
+    const status = Number(sc.code) || null;
+    const message = texts.join('\n') || sc.message || 'Wind 工具返回错误，未给出原因。';
+    throw new CliError(STATUS_CODES[status] || 'TOOL_ERROR', message, { status });
+  }
+  if (texts.length > 0) return texts.join('\n');
+  if (result?.structuredContent !== undefined) return JSON.stringify(result.structuredContent);
+  throw new CliError('TOOL_ERROR', 'Wind 返回成功但没有内容。');
+}
