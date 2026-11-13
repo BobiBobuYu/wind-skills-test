@@ -1,1 +1,0 @@
-MIGRATION-TEST v3 (committed before archiving) — updates must still work from an ARCHIVED repo via the old address.MIGRATION-TEST v2 — if you can read this file after skills update, the redirect chain works. Safe to delete.

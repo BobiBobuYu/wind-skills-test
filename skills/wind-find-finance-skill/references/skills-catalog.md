@@ -19,9 +19,6 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | wind-mcp-skill        | 数据-行情/基金/股票/宏观/文档         | API Key        | 访问万得 Wind 金融数据:A 股 / 港股股票(行情与财务) + ETF / 公募基金(行情与全维数据) + 公司公告 + 财经新闻 + 宏观经济指标                |
 | wind-one-mcp-skill    | 数据-行情/基金/股票/宏观/文档         | API Key        | 访问万得 Wind 金融数据(单 MCP 统一入口,先搜索工具再按参数调用):A 股 / 港股 / 美股股票(行情与财务) + ETF / 公募基金 + 指数 + 债券 + 公司公告 + 财经新闻 + 宏观经济指标 |
 | wind-alice            | Alice 专业金融分析 Agent              | API Key        | Alice 综合分析入口,适合事实核验、公司一页纸、调研问题清单、财报点评、主题选股、基金分析、宏观/债券/信用分析、市场规模测算和可比公司分析 |
-| wind-alice-equity-research-expert | Alice 专家-个股深研/财报事件/估值 | API Key        | Alice 个股研究专家:个股深研、财报与事件解读、估值位置与同业比较、可证伪投资 Thesis 与跟踪,用户原话直接透传 |
-| wind-alice-wealth-advisor | Alice 专家-财富管理/组合诊断/配置 | API Key        | Alice 财富管理专家:客户洞察、产品研究与筛选、持仓诊断、资产配置、调仓再平衡、定投与保险保障,用户原话直接透传 |
-| wind-alice-meeting-expert | Alice 专家-会议/业绩会/纪要 | API Key        | Alice 会议专家:路演/业绩会/调研拜访的会前准备、会中 AI 参会记录与转写、会后纪要与跟进事项,用户原话直接透传 |
 | tushare-finance-skill | 数据-行情/财务/宏观/多资产            | 依赖 + Token   | 访问 Tushare Pro 金融数据:覆盖 A 股、港股、美股、基金、期货、债券、财务报表与宏观经济指标                                               |
 
 ---
@@ -161,9 +158,6 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | volume_spike_reasoning_skill         | 盘中异动/交易判断                | 无          | 对股票盘中或日内放量异动进行归因，判断消息驱动、资金行为、情绪扩散或技术性放量 |
 | watchlist_news_impact_digest_skill   | 复盘/自选股                   | 无          | 汇总自选股在指定时间窗口内的重要新闻、公告与舆情变化，并判断影响方向 |
 | wind-alice                           | Alice 专业金融分析 Agent | API Key    | Alice 综合分析入口,适合事实核验、公司一页纸、调研问题清单、财报点评、主题选股、基金分析、宏观/债券/信用分析、市场规模测算和可比公司分析 |
-| wind-alice-equity-research-expert    | Alice 专家-个股深研/财报事件/估值 | API Key    | Alice 个股研究专家:个股深研、财报与事件解读、估值位置与同业比较、可证伪投资 Thesis 与跟踪,用户原话直接透传 |
-| wind-alice-wealth-advisor            | Alice 专家-财富管理/组合诊断/配置 | API Key    | Alice 财富管理专家:客户洞察、产品研究与筛选、持仓诊断、资产配置、调仓再平衡、定投与保险保障,用户原话直接透传 |
-| wind-alice-meeting-expert            | Alice 专家-会议/业绩会/纪要 | API Key    | Alice 会议专家:路演/业绩会/调研拜访的会前准备、会中 AI 参会记录与转写、会后纪要与跟进事项,用户原话直接透传 |
 
 ---
 
