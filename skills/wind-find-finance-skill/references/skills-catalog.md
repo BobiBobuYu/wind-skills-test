@@ -160,27 +160,6 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 
 ---
 
-## category 索引(用户问“探索”时使用)
-
-| category                      | 含 skill 数 | 代表 skill                           |
-| ----------------------------- | ----------- | ------------------------------------ |
-| 数据-行情/基金/股票/宏观/文档 | 4           | wind-mcp-skill                       |
-| Alice 专业金融分析 Agent      | 1           | wind-alice                           |
-| 估值                          | 4           | dcf-model                            |
-| 个股研究                      | 11          | stock_first_look_skill               |
-| 事件/公告/财报文档            | 11          | earnings_preview_skill               |
-| 市场主线                      | 14          | market_breadth_health_skill          |
-| 选股                          | 10          | canslim_growth_scan_skill            |
-| 复盘/自选股                   | 4           | after_close_watchlist_recap_skill    |
-| 仓位                          | 3           | position_sizing_decision_skill       |
-| 交易执行                      | 12          | premarket_trade_checklist_skill      |
-| 盘中异动/交易判断             | 3           | intraday_abnormal_move_alert_skill   |
-| 回测                          | 1           | backtest-expert                      |
-| Avatar 思维框架               | 4           | avatar-charlie-munger-thinking       |
-
-
----
-
 ## 安装公式
 
 把命令里的 `<name>` 换成上表"名称"列的值:
