@@ -682,7 +682,7 @@ function getApiKey() {
   die("KEY_MISSING", "WIND_API_KEY 未配置", {
     extraHint:
       `CLI 已完整检查：用户全局配置 > Skill 本地配置 > WIND_API_KEY 环境变量；不要再手动检查部分来源。\n` +
-      `① 获取 Key：访问 ${WIND_AIFINMARKET_PORTAL}（或 https://aifinmarket.wind.com.cn/#/user/overview）（未登录通常会跳转登录页）。\n` +
+      `① 获取 Key：访问 ${WIND_AIFINMARKET_PORTAL}（未登录通常会跳转登录页）。\n` +
       `② 选择 Key 存放位置：\n` +
       `   A. 全局共享【推荐 — 所有 wind skill 共用】：%USERPROFILE%\\.wind-aifinmarket\\config.env（或 config）\n` +
       `      内容：WIND_API_KEY=<KEY>\n` +
@@ -1016,7 +1016,7 @@ export function __setSessionContextIdForTesting(ctxId) {
  * 从 agentResult.value 抽出可下载文件链接。
  *
  * 服务端常用以下两种写法（实测来自 portal 输出）：
- *   - Markdown 链接：`[文件名.md](https://aliceexp.wind.com.cn/weaver/files/<uuid>/<filename>)`
+ *   - Markdown 链接：`[文件名.md](https://<host>/weaver/files/<uuid>/<filename>)`
  *   - 裸 URL：直接拼在文末
  *
  * 文件接口受同一份 WIND_API_KEY 鉴权（与调用 Agent 接口同一个 Key），
@@ -1788,7 +1788,7 @@ function dieKeyMissing() {
   die("KEY_MISSING", "WIND_API_KEY 未配置或已失效", {
     extraHint:
       `CLI 已完整检查：用户全局配置 > Skill 本地配置 > WIND_API_KEY 环境变量；不要再手动检查部分来源。\n` +
-      `① 获取 Key：访问 ${WIND_AIFINMARKET_PORTAL}（或 https://aifinmarket.wind.com.cn/#/user/overview）（未登录通常会跳转登录页）。\n` +
+      `① 获取 Key：访问 ${WIND_AIFINMARKET_PORTAL}（未登录通常会跳转登录页）。\n` +
       `② 选择 Key 存放位置：\n` +
       `   A. 全局共享【推荐 — 所有 wind skill 共用】：%USERPROFILE%\\.wind-aifinmarket\\config.env（或 config）\n` +
       `      内容：WIND_API_KEY=<KEY>\n` +

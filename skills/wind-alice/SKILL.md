@@ -120,7 +120,7 @@ node scripts/wind-alice.mjs --prompt "<USER_QUESTION>" --skill "<英文 Skill �
 2. 配置 **WIND_API_KEY**：
    - 优先级：`%USERPROFILE%\.wind-aifinmarket\config.env` 或 `config`（dotenv：`WIND_API_KEY=...`）> 本 skill 目录 `config.json`（`{"wind_api_key":"..."}`）> `WIND_API_KEY` 环境变量。
    - 不得手动检查部分来源后判定缺 Key。必须直接执行 CLI；只有 CLI 返回 `KEY_MISSING`，才能判定全部来源均未提供有效 Key。
-   - Key 获取入口：<https://market.windalice.com/#/user/overview>（或 <https://aifinmarket.wind.com.cn/#/user/overview>），积分充值入口：<https://market.windalice.com/#/user/credits>。
+   - Key 获取入口：<https://market.windalice.com/#/user/overview>，积分充值入口：<https://market.windalice.com/#/user/credits>。
 3. 可选：`WIND_ALICE_API_URL` 覆盖默认接口地址。
 
 ---
