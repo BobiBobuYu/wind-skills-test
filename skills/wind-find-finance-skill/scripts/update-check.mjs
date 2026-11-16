@@ -20,8 +20,8 @@ const SKILL_SCRIPTS_DIR = join(SKILL_DIR, 'scripts');
 const LOCK_FILE = join(SKILL_SCRIPTS_DIR, 'update.lock');
 const SKILL_NAME = 'wind-find-finance-skill';
 const DEFAULT_SOURCES = [
-  'Wind-Information-Co-Ltd/wind-skills',
-  'git@gitee.com:wind_info/wind-skills.git',
+  'Wind-Alice/AliceMarket',
+  'git@gitee.com:WindAlice/AliceMarket.git',
 ];
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const QUIET_MS = 10 * 1000;

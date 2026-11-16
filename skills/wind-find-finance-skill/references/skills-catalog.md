@@ -12,17 +12,24 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 
 ## 数据类(取数 / 查询)
 
-> 取数 / 查询:行情、基金、股票财务、公告、新闻、宏观指标。
+> 取数 / 查询:行情、财务、基金、债券、期货期权、宏观指标、公告、新闻、研报。
 
 | 名称                  | category                              | 装好需配置     | 一句话                                                                                                                                  |
 | --------------------- | ------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| wind-mcp-skill        | 数据-行情/基金/股票/宏观/文档         | API Key        | 访问万得 Wind 金融数据:A 股 / 港股股票(行情与财务) + ETF / 公募基金(行情与全维数据) + 公司公告 + 财经新闻 + 宏观经济指标                |
-| wind-one-mcp-skill    | 数据-行情/基金/股票/宏观/文档         | API Key        | 访问万得 Wind 金融数据(单 MCP 统一入口,先搜索工具再按参数调用):A 股 / 港股 / 美股股票(行情与财务) + ETF / 公募基金 + 指数 + 债券 + 公司公告 + 财经新闻 + 宏观经济指标 |
-| wind-alice            | Alice 专业金融分析 Agent              | API Key        | Alice 综合分析入口,适合事实核验、公司一页纸、调研问题清单、财报点评、主题选股、基金分析、宏观/债券/信用分析、市场规模测算和可比公司分析 |
+| wind-mcp-skill        | 数据-行情/财务/基金/债券/宏观/文档    | API Key        | 访问万得 Wind 金融数据,先搜索工具再按参数调用:A 股 / 港股 / 美股及全球市场的股票(行情与财务)、基金 / ETF / REITs、指数与板块、债券、期货、期权、商品、外汇、宏观经济、企业工商与风险,以及公告、新闻、研报 |
 
 ---
 
-## Alice 子 Skill 索引
+## Alice 金融分析 Agent
+
+> 由万得 Alice Agent 完成分析。点名下面「Alice 子 Skill 索引」里的能力时用 `wind-alice`;需要经济、个股、行业、市场监测、会议或财富管理方面的专家多轮深入分析时用 `alice-experts`,用户原话直接传给专家。
+
+| 名称          | category                 | 装好需配置 | 一句话 |
+| ------------- | ------------------------ | ---------- | ------ |
+| wind-alice    | Alice 专业金融分析 Agent | API Key    | Alice 综合分析入口,适合事实核验、公司一页纸、调研问题清单、财报点评、主题选股、基金分析、宏观/债券/信用分析、市场规模测算和可比公司分析 |
+| alice-experts | Alice 领域专家           | API Key    | 万得 Alice 6 位领域专家:经济研究、个股研究、行业研究、市场监测、会议、财富管理顾问,用户原话直接透传 |
+
+### Alice 子 Skill 索引
 
 > 这些能力由 `wind-alice` 统一承载。用户点名中文名、英文名或提出高度匹配的问题时,推荐安装 / 调用 `wind-alice`,并把对应子 Skill 名传给 Alice。
 
@@ -87,13 +94,13 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | 名称                                 | category                 | 装好需配置 | 一句话                                                                                                                                  |
 | ------------------------------------ | ------------------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | dcf-model                            | 估值                     | 无         | DCF 估值建模(WACC + 敏感性分析)                                                                                                         |
-| earnings-analysis                    | 估值-季报                | 无         | 季报点评(beat/miss + 估值更新)                                                                                                          |
+| earnings-analysis                    | 估值                   | 无         | 季报点评(beat/miss + 估值更新)                                                                                                          |
 | valuation-pricing-framework          | 估值                     | 无         | 估值与定价框架(重估空间判断)                                                                                                            |
 | equity-investment-thesis             | 个股研究                 | 无         | 个股投资逻辑深度研究(券商研究员风格)                                                                                                    |
 | a-share-primary-theme-identification | 市场主线                 | 无         | A 股市场主线识别(题材周期 / 资金行为)                                                                                                   |
 | market-environment-analysis          | 市场主线                 | 无         | 全球市场环境分析(risk-on / risk-off)                                                                                                    |
 | theme-detector                       | 市场主线                 | 无         | 跨板块主题检测(FINVIZ + 生命周期)                                                                                                       |
-| post-market-debrief                  | 复盘                     | 无         | 盘后复盘(市场全景 / 主线轮动)                                                                                                           |
+| post-market-debrief                  | 复盘/自选股                 | 无         | 盘后复盘(市场全景 / 主线轮动)                                                                                                           |
 | position-sizer                       | 仓位                     | 无         | 仓位管理(风险 / Kelly / ATR)                                                                                                            |
 | backtest-expert                      | 回测                     | 无         | 量化策略系统化回测(压力测试)                                                                                                            |
 | valuation_snapshot_skill             | 估值                     | 无         | 快速判断个股估值高低、所处分位与重估触发条件                                                                                            |
@@ -108,15 +115,15 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | sector_rotation_radar_skill          | 市场主线                 | 无         | 识别板块强弱切换、资金迁移与风格变化，服务市场主线判断                                                                                  |
 | market_regime_switch_skill           | 市场主线                 | 无         | 判断市场处于进攻、防守、震荡或切换阶段，服务总仓位与风格判断                                                                            |
 | institutional_position_shift_skill   | 市场主线                 | 无         | 识别机构持仓变化与共识迁移，服务季报持仓研究                                                                                            |
-| theme_leader_identification_skill    | 市场主线/选股            | 无         | 识别热门题材中的龙头、中军和跟随股，判断谁最值得跟踪                                                                                    |
+| theme_leader_identification_skill    | 选股                 | 无         | 识别热门题材中的龙头、中军和跟随股，判断谁最值得跟踪                                                                                    |
 | breakout_candidate_finder_skill      | 选股                     | 无         | 筛选形态成熟、放量待发的突破候选股，并给出触发条件                                                                                      |
 | pullback_opportunity_finder_skill    | 选股                     | 无         | 寻找回调充分但趋势未破坏的候选股，定位低吸观察区                                                                                        |
 | high_quality_compounder_finder_skill | 选股                     | 无         | 筛选高 ROE、高护城河、可长期复利的核心候选股                                                                                            |
 | trade_plan_builder_skill             | 交易执行                 | 无         | 下单前生成包含入场、仓位、止损止盈的完整计划                                                                                            |
-| position_sizing_decision_skill       | 交易执行/仓位            | 无         | 按风险预算和波动水平给出单笔仓位与分批建议                                                                                              |
+| position_sizing_decision_skill       | 仓位                 | 无         | 按风险预算和波动水平给出单笔仓位与分批建议                                                                                              |
 | stop_loss_discipline_skill           | 交易执行                 | 无         | 设计价格、逻辑、时间三类止损规则与执行动作                                                                                              |
 | take_profit_ladder_skill             | 交易执行                 | 无         | 为盈利仓设计分层兑现、保本上移与尾仓持有规则                                                                                            |
-| add_to_winner_decision_skill         | 交易执行/仓位                  | 无          | 判断盈利仓是否适合继续加仓，并给出加仓前提、节奏安排、保护规则与停止扩张边界 |
+| add_to_winner_decision_skill         | 仓位                       | 无          | 判断盈利仓是否适合继续加仓，并给出加仓前提、节奏安排、保护规则与停止扩张边界 |
 | after_close_watchlist_recap_skill    | 复盘/自选股                   | 无          | 收盘后总结自选股当日表现、驱动因素、强弱分化与次日观察点 |
 | breakout_trade_execution_skill       | 交易执行                     | 无          | 围绕突破交易制定从观察、触发、跟进到失效处理的落地执行方案 |
 | buyback_program_reviewer_skill       | 事件/公告/财报文档               | 无          | 判断回购计划的规模、动机、执行约束与真实利好程度 |
@@ -156,7 +163,6 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | vcp_breakout_scan_skill              | 选股                       | 无          | 筛选波动逐级收缩、抛压减弱、结构趋于成熟的突破预备股 |
 | volume_spike_reasoning_skill         | 盘中异动/交易判断                | 无          | 对股票盘中或日内放量异动进行归因，判断消息驱动、资金行为、情绪扩散或技术性放量 |
 | watchlist_news_impact_digest_skill   | 复盘/自选股                   | 无          | 汇总自选股在指定时间窗口内的重要新闻、公告与舆情变化，并判断影响方向 |
-| wind-alice                           | Alice 专业金融分析 Agent | API Key    | Alice 综合分析入口,适合事实核验、公司一页纸、调研问题清单、财报点评、主题选股、基金分析、宏观/债券/信用分析、市场规模测算和可比公司分析 |
 
 ---
 
@@ -167,9 +173,9 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 ```bash
 # 全局安装(推荐 — 跨项目 + 跨 AI agent 共享)
 # 国外(GitHub)
-npx skills add Wind-Information-Co-Ltd/wind-skills --skill <name> -g -y
+npx skills add Wind-Alice/AliceMarket --skill <name> -g -y
 # 国内(Gitee 镜像)
-npx skills add https://gitee.com/wind_info/wind-skills.git --skill <name> -g -y
+npx skills add https://gitee.com/WindAlice/AliceMarket.git --skill <name> -g -y
 ```
 
 > 想限制在当前项目内用,把上面命令的 `-g` 去掉即可。

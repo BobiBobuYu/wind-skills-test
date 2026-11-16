@@ -20,9 +20,9 @@
 ```bash
 # 全局（推荐 — 跨项目 + 跨 AI agent 共享）
 # GitHub
-npx skills add Wind-Information-Co-Ltd/wind-skills --skill wind-find-finance-skill -g -y
+npx skills add Wind-Alice/AliceMarket --skill wind-find-finance-skill -g -y
 # Gitee 镜像（国内）
-npx skills add https://gitee.com/wind_info/wind-skills.git --skill wind-find-finance-skill -g -y
+npx skills add https://gitee.com/WindAlice/AliceMarket.git --skill wind-find-finance-skill -g -y
 ```
 
 > 想限制在当前项目内用，把命令的 `-g` 去掉即可。`-g` 会自动 symlink 到机器上所有已识别的 AI agent（Claude Code / Cursor / OpenClaw / Hermes 等）。
