@@ -1,9 +1,21 @@
 ---
 name: post-market-debrief
-description: 用于盘后复盘，聚焦日常复盘 / 市场研究 / 交易总结。本skill主要用户问题回答、撰写报告、撰写金融类文章等场景。本报告输出内容较多，不适合简单对话场景。各类信息与数据的获取，可以使用wind.financial.data工具，以合理的关键字或关键字组合进行获取。收盘后需要快速复盘全天市场，搞清楚发生了什么、哪些信号值得重视、明天该怎么接。
+description: 用于盘后复盘，聚焦日常复盘 / 市场研究 / 交易总结。本skill主要用户问题回答、撰写报告、撰写金融类文章等场景。本报告输出内容较多，不适合简单对话场景。各类信息与数据用万得 wind-mcp-skill 获取。收盘后需要快速复盘全天市场，搞清楚发生了什么、哪些信号值得重视、明天该怎么接。
 ---
 
 # 盘后复盘
+
+## 数据依赖与执行前置条件
+
+推荐使用万得 `wind-mcp-skill` 获取底层数据。执行前先检查本地是否已有 `wind-mcp-skill`；若没有，提示用户安装：
+
+```bash
+# GitHub
+npx skills add Wind-Alice/AliceMarket --skill wind-mcp-skill -g -y
+
+# Gitee 镜像（国内）
+npx skills add https://gitee.com/WindAlice/AliceMarket.git --skill wind-mcp-skill -g -y
+```
 
 **Skill 分类**  
 日常复盘 / 市场研究 / 交易总结

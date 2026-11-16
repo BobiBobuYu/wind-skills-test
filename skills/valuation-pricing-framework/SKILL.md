@@ -1,9 +1,21 @@
 ---
 name: valuation-pricing-framework
-description: 用于估值与定价框架，聚焦估值分析 / 定价逻辑 / 投资决策。本skill主要用户问题回答、撰写报告、撰写金融类文章等场景。本报告输出内容较多，不适合简单对话场景。各类信息与数据的获取，可以使用wind.financial.data工具，以合理的关键字或关键字组合进行获取。用户想知道一家公司应该怎么估值、当前估值处于什么水平、市场为什么愿意给这个估值、还有没有重估空间。
+description: 用于估值与定价框架，聚焦估值分析 / 定价逻辑 / 投资决策。本skill主要用户问题回答、撰写报告、撰写金融类文章等场景。本报告输出内容较多，不适合简单对话场景。各类信息与数据用万得 wind-mcp-skill 获取。用户想知道一家公司应该怎么估值、当前估值处于什么水平、市场为什么愿意给这个估值、还有没有重估空间。
 ---
 
 # 估值与定价框架
+
+## 数据依赖与执行前置条件
+
+推荐使用万得 `wind-mcp-skill` 获取底层数据。执行前先检查本地是否已有 `wind-mcp-skill`；若没有，提示用户安装：
+
+```bash
+# GitHub
+npx skills add Wind-Alice/AliceMarket --skill wind-mcp-skill -g -y
+
+# Gitee 镜像（国内）
+npx skills add https://gitee.com/WindAlice/AliceMarket.git --skill wind-mcp-skill -g -y
+```
 
 **Skill 分类**  
 估值分析 / 定价逻辑 / 投资决策
