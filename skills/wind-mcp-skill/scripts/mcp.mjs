@@ -22,7 +22,7 @@ export const SKILL_VERSION = '4.0.0';
 export const SKILL_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 // WIND_MCP_ENDPOINT 只用于测试或私有部署；默认连 Wind 主站。
-export const ENDPOINT = process.env.WIND_MCP_ENDPOINT || 'https://mcp.wind.com.cn/vserver_wind_tools/mcp/';
+export const ENDPOINT = process.env.WIND_MCP_ENDPOINT || 'https://mcp.windalice.com/vserver_wind_tools/mcp/';
 export const SEARCH_TOOL = 'market_search_tools';
 export const CALL_TOOL = 'market_call_tool';
 const PORTAL_URL = 'https://market.windalice.com/#/user/overview';
