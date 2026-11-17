@@ -49,7 +49,7 @@ wind-find-finance-skill/
 
 1. 运行 `node scripts/update-check.mjs`：后台检查本 skill 和清单有没有新版本，不输出内容
 2. 读 `references/skills-catalog.md`，按问题选 1–3 个 skill
-3. 已装的交给它处理；没装的问用户装不装、装到当前项目还是所有 agent，同意后安装；用户不装时用已有的 skill 继续回答
+3. 已装的交给它处理；没装的问用户装不装，同意后全局安装；用户不装时用已有的 skill 继续回答
 
 ---
 

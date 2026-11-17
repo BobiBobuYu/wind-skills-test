@@ -33,22 +33,34 @@ node scripts/update-check.mjs
 
 选中的 skill 已经装好（在当前可用的 skill 里，或 `.agents/skills/<name>/SKILL.md`、`~/.agents/skills/<name>/SKILL.md` 存在）时，按它的说明处理用户的问题。
 
-没装时，告诉用户推荐哪个 skill、能做什么、装好后要不要配置 API Key，问用户装不装、装到当前项目还是所有 agent。用户同意后运行安装命令，`<name>` 换成清单里的名称：
+没装时，告诉用户推荐哪个 skill、能做什么、装好后要不要配置 API Key，问用户装不装。用户同意后全局安装，`<name>` 换成清单里的名称：
 
 ```bash
-# 装到所有 agent
+# GitHub
 npx skills add Wind-Alice/AliceMarket --skill <name> -g -y
-# 只装到当前项目（在项目根目录运行）
-npx skills add Wind-Alice/AliceMarket --skill <name> -y
+# Gitee 镜像（GitHub 连不上时）
+npx skills add https://gitee.com/WindAlice/AliceMarket.git --skill <name> -g -y
 ```
 
-GitHub 连不上时，把 `Wind-Alice/AliceMarket` 换成 `https://gitee.com/WindAlice/AliceMarket.git`。
+- `-g`：全局安装，所有项目和本机已识别的 agent（Claude Code、Cursor、OpenClaw、Hermes 等）都能用。
+- `-y`：跳过交互菜单，必须带，不带会卡住。
+- 用户要求只装到当前项目时，去掉 `-g`，在项目根目录运行。
 
 装好后读新 skill 的 SKILL.md，按它的说明继续；需要 API Key 的按它的说明配置。客户端要重新加载才能识别新 skill 时，再告诉用户。
 
 用户不装时，用已有的 skill 继续回答（如用 wind-mcp-skill 取数），并说明没有用到专门的 skill。
 
+## 升级
+
+用户要升级万得 skill 时运行，`<name>` 换成要升级的 skill，可以写多个：
+
+```bash
+npx skills update <name> -g -y
+```
+
+不写 skill 名会升级全局装的所有 skill，包括非万得的，只在用户要求全部升级时这样用。
+
 ## 注意事项
 
-- **运行目录**：更新脚本在本 SKILL.md 所在目录运行；只装到当前项目的安装命令在用户的项目根目录运行。
+- **运行目录**：更新脚本在本 SKILL.md 所在目录运行。
 - **清单**：`references/skills-catalog.md` 随本 skill 一起更新，推荐以清单为准。

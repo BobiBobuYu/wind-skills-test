@@ -1,12 +1,12 @@
 ---
 name: find-skills-catalog
-description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 wind-find-finance-skill 一起更新。
+description: 平台 skill 清单本地副本，随 wind-find-finance-skill 一起更新。
 ---
 
 # Skill 目录
 
 > 平台所有可装 skill 的清单。
-> 由 `npx skills update -g -y` 随 wind-find-finance-skill 一起更新。
+> 随 wind-find-finance-skill 一起更新。
 
 ---
 
@@ -163,35 +163,3 @@ description: 平台 skill 清单本地副本。由 npx skills update -g -y 随 w
 | vcp_breakout_scan_skill              | 选股                       | 无          | 筛选波动逐级收缩、抛压减弱、结构趋于成熟的突破预备股 |
 | volume_spike_reasoning_skill         | 盘中异动/交易判断                | 无          | 对股票盘中或日内放量异动进行归因，判断消息驱动、资金行为、情绪扩散或技术性放量 |
 | watchlist_news_impact_digest_skill   | 复盘/自选股                   | 无          | 汇总自选股在指定时间窗口内的重要新闻、公告与舆情变化，并判断影响方向 |
-
----
-
-## 安装公式
-
-把命令里的 `<name>` 换成上表"名称"列的值:
-
-```bash
-# 全局安装(推荐 — 跨项目 + 跨 AI agent 共享)
-# 国外(GitHub)
-npx skills add Wind-Alice/AliceMarket --skill <name> -g -y
-# 国内(Gitee 镜像)
-npx skills add https://gitee.com/WindAlice/AliceMarket.git --skill <name> -g -y
-```
-
-> 想限制在当前项目内用,把上面命令的 `-g` 去掉即可。
-
-参数说明:
-
-- `-g`:全局安装 — 跨项目 + 自动 symlink 到机器上所有已识别 AI agent(Claude Code / Cursor / OpenClaw / Hermes 等)。金融机构内网推荐。
-- 去掉 `-g`:仅当前项目 — 装到当前目录,不影响其它项目 / agent。
-- `-y`:**必加**,跳过交互菜单(不加会卡)
-
----
-
-## 升级所有已装 skill
-
-```bash
-npx skills update -g -y
-```
-
-含义:`update` 重拉所有已装 skill 最新版,`-g` 只升级全局,`-y` 跳过 scope 提示。
